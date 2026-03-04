@@ -181,9 +181,7 @@ Alpine.data('accountOptions', () => ({
   },
   async onCheckBoxChange() {
     try {
-      const selectedAccounts = Array.from(
-        this.$root.querySelectorAll<HTMLInputElement>('input[data-account-checkbox]:checked'),
-      ).map((input) => input.value);
+      const selectedAccounts = [...this.selectedAccounts];
 
       this.selectedAccounts = selectedAccounts;
       await chrome.storage.local.set({
@@ -191,25 +189,25 @@ Alpine.data('accountOptions', () => ({
       });
       const stored = await chrome.storage.local.get(['selectedAccounts']);
       this.selectedAccounts = stored.selectedAccounts ?? [];
-    } catch {}
+    } catch { /* empty */ }
   },
-  onApiInput() {
-    const target = this.$event.target as HTMLInputElement;
+  onApiInput(event: Event) {
+    const target = event.target as HTMLInputElement;
     this.notionApiKey = target.value;
     saveExtensionSettings({
       notionApiKey: this.notionApiKey.trim(),
     }).catch(() => {});
     this.refreshSaveHint();
   },
-  onBalanceLinkInput() {
-    const target = this.$event.target as HTMLInputElement;
+  onBalanceLinkInput(event: Event) {
+    const target = event.target as HTMLInputElement;
     this.balanceState.link = target.value;
     saveExtensionSettings({
       balanceDatabaseLinkDraft: this.balanceState.link,
     }).catch(() => {});
   },
-  onTransactionsLinkInput() {
-    const target = this.$event.target as HTMLInputElement;
+  onTransactionsLinkInput(event: Event) {
+    const target = event.target as HTMLInputElement;
     this.transactionsState.link = target.value;
     saveExtensionSettings({
       transactionsDatabaseLinkDraft: this.transactionsState.link,
@@ -349,8 +347,8 @@ Alpine.data('accountOptions', () => ({
     }).catch(() => {});
     this.refreshSaveHint();
   },
-  onTransactionsDateChange() {
-    const target = this.$event.target as HTMLSelectElement;
+  onTransactionsDateChange(event: Event) {
+    const target = event.target as HTMLSelectElement;
     this.transactionsFieldMapping.dateProperty = target.value;
     this.refreshTransactionsMappingState();
     this.refreshSaveHint();
@@ -358,8 +356,8 @@ Alpine.data('accountOptions', () => ({
       transactionsFieldMapping: Alpine.raw(this.transactionsFieldMapping),
     }).catch(() => {});
   },
-  onTransactionsAmountChange() {
-    const target = this.$event.target as HTMLSelectElement;
+  onTransactionsAmountChange(event: Event) {
+    const target = event.target as HTMLSelectElement;
     this.transactionsFieldMapping.amountProperty = target.value;
     this.refreshTransactionsMappingState();
     this.refreshSaveHint();
@@ -367,8 +365,8 @@ Alpine.data('accountOptions', () => ({
       transactionsFieldMapping: Alpine.raw(this.transactionsFieldMapping),
     }).catch(() => {});
   },
-  onTransactionsMerchantChange() {
-    const target = this.$event.target as HTMLSelectElement;
+  onTransactionsMerchantChange(event: Event) {
+    const target = event.target as HTMLSelectElement;
     this.transactionsFieldMapping.merchantProperty = target.value;
     this.refreshTransactionsMappingState();
     this.refreshSaveHint();
@@ -376,8 +374,8 @@ Alpine.data('accountOptions', () => ({
       transactionsFieldMapping: Alpine.raw(this.transactionsFieldMapping),
     }).catch(() => {});
   },
-  onTransactionsAccountNameChange() {
-    const target = this.$event.target as HTMLSelectElement;
+  onTransactionsAccountNameChange(event: Event) {
+    const target = event.target as HTMLSelectElement;
     this.transactionsFieldMapping.accountNameProperty = target.value;
     this.refreshTransactionsMappingState();
     this.refreshSaveHint();
