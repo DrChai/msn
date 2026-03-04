@@ -8,11 +8,6 @@ import { getExtensionSettings, saveExtensionSettings } from '../lib/storage';
 window.Alpine = Alpine;
 
 const parseCurrency = (str: string): number => parseFloat(str.replace(/[^0-9.-]+/g, ''));
-const parseSignedAmount = (str: string): number => {
-  const normalized = str.replace(/[−–]/g, '-');
-  const parsed = parseFloat(normalized.replace(/[^0-9.-]+/g, ''));
-  return Number.isNaN(parsed) ? 0 : parsed;
-};
 const toRichText = (content: string) => ({
   type: 'rich_text' as const,
   rich_text: [
@@ -66,6 +61,9 @@ type NotionPageProperty = {
 type NotionQueryPage = {
   properties?: Record<string, NotionPageProperty | undefined>;
 };
+
+type NotionPageCreateRequest = Parameters<Client['pages']['create']>[0];
+type NotionPageCreateProperties = NonNullable<NotionPageCreateRequest['properties']>;
 
 const getTransactionsDateRange = (transactions: Transaction[]): { start: string; end: string } | null => {
   const dates = transactions
@@ -330,7 +328,7 @@ Alpine.data('popup', () => ({
       }
 
       await Promise.all(
-        this.filteredAccts.map((acct) =>
+        this.filteredAccts.map((acct: Account) =>
           notion.pages.create({
             parent: {
               data_source_id: balanceDatabase.dataSourceId!,
@@ -437,7 +435,7 @@ Alpine.data('popup', () => ({
       }
 
       const transactionSyncIds = await Promise.all(
-        this.detectedTransactions.map(async (transaction) => ({
+        this.detectedTransactions.map(async (transaction: Transaction) => ({
           transaction,
           syncId: await createTransactionSyncId(transaction),
         })),
@@ -469,7 +467,7 @@ Alpine.data('popup', () => ({
 
       await Promise.all(
         unsyncedTransactions.map(({ transaction, syncId }) => {
-          const properties: Record<string, unknown> = {
+          const properties: NotionPageCreateProperties = {
             [this.transactionsFieldMapping!.dateProperty]: {
               type: 'date',
               date: {
@@ -513,7 +511,6 @@ Alpine.data('popup', () => ({
 Alpine.start();
 
 const TARGET_DOMAIN = 'cibconline.cibc.com';
-const PAGE_SCAN_INTERVAL_MS = 3000;
 
 const syncAccountTypesFromPage = () => {
   const accountGroups = document.querySelectorAll('.account-groups-container');
@@ -540,8 +537,8 @@ const getAllAccounts = (selectedTypes: string[]) => {
     const nameElement = container.querySelector('.account-name span');
     const balanceElement = container.querySelector('.account-balance p');
 
-    const name = nameElement ? nameElement.innerText.trim() : 'No name found';
-    const balance = balanceElement ? balanceElement.innerText.trim() : 'No balance found';
+    const name = nameElement instanceof HTMLElement ? nameElement.innerText.trim() : 'No name found';
+    const balance = balanceElement instanceof HTMLElement ? balanceElement.innerText.trim() : 'No balance found';
 
     accounts.push({ name, balance });
   });
@@ -836,4 +833,3 @@ const scanCurrentPage = () => {
 * Popup scripts are ephemeral and only run while the popup is open. setInterval wouldnt act as supposed to do.
 */
 scanCurrentPage();
-// window.setInterval(scanCurrentPage, PAGE_SCAN_INTERVAL_MS);

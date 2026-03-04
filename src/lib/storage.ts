@@ -86,7 +86,7 @@ type RawSettings = Partial<ExtensionSettings> & {
 };
 
 export const getExtensionSettings = async (): Promise<ExtensionSettings> => {
-  const stored = (await chrome.storage.local.get(STORAGE_KEYS)) as RawSettings;
+  const stored = (await chrome.storage.local.get([...STORAGE_KEYS])) as RawSettings;
   const legacyDatabase = stored.selectedDatabase ?? null;
   const balanceDatabase = normalizeDatabase(stored.balanceDatabase ?? legacyDatabase);
 

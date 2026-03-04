@@ -59,6 +59,9 @@ type NotionDataSourceResponse = {
   };
 };
 
+type NotionDataSourceUpdateRequest = Parameters<Client['dataSources']['update']>[0];
+type NotionDataSourceUpdateProperties = NonNullable<NotionDataSourceUpdateRequest['properties']>;
+
 type DatabaseConnectionResult = {
   database: Database;
   suggestedMapping: TransactionsFieldMapping | null;
@@ -337,7 +340,7 @@ const retrieveConnectedDatabase = async (
 const updateDatabaseProperties = async (
   notion: Client,
   dataSourceId: string,
-  properties: Record<string, object>,
+  properties: NotionDataSourceUpdateProperties,
 ): Promise<void> => {
   if (Object.keys(properties).length === 0) {
     return;
@@ -356,7 +359,7 @@ const ensureBalanceSchema = async (
   preferredDataSourceId?: string,
 ): Promise<Database> => {
   let mapped = await retrieveConnectedDatabase(notion, databaseId, link, EMPTY_SCHEMA_STATUS(), preferredDataSourceId);
-  const propertiesToCreate: Record<string, object> = {};
+  const propertiesToCreate: NotionDataSourceUpdateProperties = {};
   const autoCreatedFields: string[] = [];
   const notes: string[] = [];
 
@@ -388,7 +391,7 @@ const ensureTransactionsSchema = async (
   preferredDataSourceId?: string,
 ): Promise<Database> => {
   let mapped = await retrieveConnectedDatabase(notion, databaseId, link, EMPTY_SCHEMA_STATUS(), preferredDataSourceId);
-  const propertiesToCreate: Record<string, object> = {};
+  const propertiesToCreate: NotionDataSourceUpdateProperties = {};
   const autoCreatedFields: string[] = [];
 
   if (!findPropertyByType(mapped, 'number')) {

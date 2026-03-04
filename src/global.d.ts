@@ -1,7 +1,16 @@
-declare global {
-  interface Window {
-    Alpine: typeof Alpine;
+declare module '@alpinejs/csp' {
+  interface AlpineInstance {
+    data(name: string, callback: (...args: any[]) => any): void;
+    raw<T>(value: T): T;
+    start(): void;
   }
+
+  const Alpine: AlpineInstance;
+  export default Alpine;
+}
+
+interface Window {
+  Alpine: import('@alpinejs/csp').default;
 }
 
 type Account = {
