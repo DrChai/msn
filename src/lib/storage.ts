@@ -59,11 +59,14 @@ const normalizeDatabase = (database: Database | null | undefined): Database | nu
     return null;
   }
 
+  const maybeDatabase = database as Database & { dataSourceId?: unknown; link?: unknown; properties?: unknown };
+
   return {
     ...database,
+    dataSourceId: typeof maybeDatabase.dataSourceId === 'string' ? maybeDatabase.dataSourceId : null,
     schemaStatus: database.schemaStatus ?? null,
-    link: database.link ?? '',
-    properties: normalizeDatabaseProperties((database as Database & { properties?: unknown }).properties),
+    link: typeof maybeDatabase.link === 'string' ? maybeDatabase.link : '',
+    properties: normalizeDatabaseProperties(maybeDatabase.properties),
   };
 };
 

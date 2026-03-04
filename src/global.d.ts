@@ -39,6 +39,7 @@ type DatabaseSchemaStatus = {
 };
 type Database = {
   id: string;
+  dataSourceId: string | null;
   title: string;
   icon: string | null;
   emoji: string | null;

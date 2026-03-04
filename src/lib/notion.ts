@@ -15,6 +15,18 @@ type NotionIcon =
         url: string;
       };
     }
+  | {
+      type: 'file';
+      file: {
+        url: string;
+      };
+    }
+  | {
+      type: 'custom_emoji';
+      custom_emoji: {
+        url: string;
+      };
+    }
   | null;
 
 type NotionPropertyResponse = {
@@ -27,7 +39,24 @@ type NotionDatabaseResponse = {
   id: string;
   title?: NotionTitleItem[];
   icon?: NotionIcon;
+  data_sources?: Array<{
+    id: string;
+    name?: string;
+  }>;
+};
+
+type NotionDataSourceResponse = {
+  id: string;
+  title?: NotionTitleItem[];
+  icon?: NotionIcon;
   properties: Record<string, NotionPropertyResponse>;
+  parent?: {
+    type: 'database_id';
+    database_id: string;
+  } | {
+    type: 'data_source_id';
+    data_source_id: string;
+  };
 };
 
 type DatabaseConnectionResult = {
@@ -51,6 +80,16 @@ const TRANSACTION_AUTO_PROPERTIES = {
   [TRANSACTION_SYNC_ID_PROPERTY]: { rich_text: {} },
 } as const;
 
+const NOTION_ID_PATTERN = /[0-9a-z]{32}|[0-9a-z]{8}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{12}/i;
+const NOTION_PATH_ID_PATTERN = /(?:^|-)([0-9a-z]{32}|[0-9a-z]{8}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{12})$/i;
+
+const EMPTY_SCHEMA_STATUS = (): DatabaseSchemaStatus => ({
+  isValid: false,
+  missingFields: [],
+  autoCreatedFields: [],
+  notes: [],
+});
+
 const normalizeNotionId = (value: string): string => {
   const compact = value.replace(/-/g, '').toLowerCase();
   if (compact.length !== 32) {
@@ -66,10 +105,34 @@ const normalizeNotionId = (value: string): string => {
   ].join('-');
 };
 
-const titleFromDatabase = (title: NotionTitleItem[] | undefined): string => {
-  const plainTitle = title?.map((item) => item.plain_text ?? '').join('').trim();
-  return plainTitle || 'Untitled database';
+const extractNotionId = (value: string): string | null => {
+  const match = value.match(NOTION_ID_PATTERN);
+  return match ? normalizeNotionId(match[0]) : null;
 };
+
+const plainTitle = (title: NotionTitleItem[] | undefined): string => title?.map((item) => item.plain_text ?? '').join('').trim() ?? '';
+
+const iconUrlFromIcon = (icon: NotionIcon | undefined): string | null => {
+  if (!icon) {
+    return null;
+  }
+
+  if (icon.type === 'external') {
+    return icon.external.url;
+  }
+
+  if (icon.type === 'file') {
+    return icon.file.url;
+  }
+
+  if (icon.type === 'custom_emoji') {
+    return icon.custom_emoji.url;
+  }
+
+  return null;
+};
+
+const emojiFromIcon = (icon: NotionIcon | undefined): string | null => (icon?.type === 'emoji' ? icon.emoji : null);
 
 const mapProperties = (properties: Record<string, NotionPropertyResponse>): DatabaseProperty[] =>
   Object.entries(properties).map(([fallbackName, property]) => ({
@@ -89,20 +152,28 @@ const mapProperties = (properties: Record<string, NotionPropertyResponse>): Data
   }));
 
 const mapDatabase = (
-  response: NotionDatabaseResponse,
+  databaseResponse: NotionDatabaseResponse,
+  dataSourceResponse: NotionDataSourceResponse,
   link: string,
-  schemaStatus: DatabaseSchemaStatus,
+  schemaStatus: DatabaseSchemaStatus | null,
 ): Database => ({
-  id: response.id,
-  title: titleFromDatabase(response.title),
-  icon: response.icon?.type === 'external' ? response.icon.external.url : null,
-  emoji: response.icon?.type === 'emoji' ? response.icon.emoji : null,
-  properties: mapProperties(response.properties),
+  id: databaseResponse.id,
+  dataSourceId: dataSourceResponse.id,
+  title: plainTitle(dataSourceResponse.title) || plainTitle(databaseResponse.title) || 'Untitled database',
+  icon: iconUrlFromIcon(dataSourceResponse.icon) ?? iconUrlFromIcon(databaseResponse.icon),
+  emoji: emojiFromIcon(dataSourceResponse.icon) ?? emojiFromIcon(databaseResponse.icon),
+  properties: mapProperties(dataSourceResponse.properties),
   link,
   schemaStatus,
 });
 
-const createClient = (apiKey: string): Client => new Client({ auth: apiKey.trim() });
+const browserSafeFetch: typeof fetch = (input, init) => globalThis.fetch(input, init);
+
+export const createNotionClient = (apiKey: string): Client =>
+  new Client({
+    auth: apiKey.trim(),
+    fetch: browserSafeFetch,
+  });
 
 const getDatabaseProperty = (database: Database, predicate: (property: DatabaseProperty) => boolean): DatabaseProperty | undefined =>
   database.properties.find(predicate);
@@ -218,37 +289,73 @@ const makeReadableError = (error: unknown): string => {
   return 'Unknown error';
 };
 
-const updateDatabaseProperties = async (
+const resolveDataSourceId = (response: NotionDatabaseResponse, preferredDataSourceId?: string): string => {
+  const dataSources = response.data_sources ?? [];
+
+  if (preferredDataSourceId && dataSources.some((dataSource) => dataSource.id === preferredDataSourceId)) {
+    return preferredDataSourceId;
+  }
+
+  if (dataSources.length === 1) {
+    return dataSources[0].id;
+  }
+
+  if (dataSources.length === 0) {
+    throw new Error('Notion database has no data sources available for syncing.');
+  }
+
+  throw new Error('Notion database has multiple data sources. Connect a database that has only one data source.');
+};
+
+const retrieveDatabaseContainer = async (notion: Client, databaseId: string): Promise<NotionDatabaseResponse> =>
+  (await notion.databases.retrieve({
+    database_id: databaseId,
+  })) as unknown as NotionDatabaseResponse;
+
+const retrieveDataSource = async (notion: Client, dataSourceId: string): Promise<NotionDataSourceResponse> =>
+  (await notion.dataSources.retrieve({
+    data_source_id: dataSourceId,
+  })) as unknown as NotionDataSourceResponse;
+
+const isObjectNotFoundError = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null && 'code' in error && error.code === 'object_not_found';
+
+const retrieveConnectedDatabase = async (
   notion: Client,
   databaseId: string,
+  link: string,
+  schemaStatus: DatabaseSchemaStatus | null,
+  preferredDataSourceId?: string,
+): Promise<Database> => {
+  const databaseResponse = await retrieveDatabaseContainer(notion, databaseId);
+  const dataSourceId = resolveDataSourceId(databaseResponse, preferredDataSourceId);
+  const dataSourceResponse = await retrieveDataSource(notion, dataSourceId);
+
+  return mapDatabase(databaseResponse, dataSourceResponse, link, schemaStatus);
+};
+
+const updateDatabaseProperties = async (
+  notion: Client,
+  dataSourceId: string,
   properties: Record<string, object>,
 ): Promise<void> => {
   if (Object.keys(properties).length === 0) {
     return;
   }
 
-  await notion.databases.update({
-    database_id: databaseId,
+  await notion.dataSources.update({
+    data_source_id: dataSourceId,
     properties,
   });
 };
 
-const retrieveDatabase = async (notion: Client, databaseId: string): Promise<NotionDatabaseResponse> =>
-  (await notion.databases.retrieve({
-    database_id: databaseId,
-  })) as unknown as NotionDatabaseResponse;
-
 const ensureBalanceSchema = async (
   notion: Client,
   link: string,
-  response: NotionDatabaseResponse,
+  databaseId: string,
+  preferredDataSourceId?: string,
 ): Promise<Database> => {
-  let mapped = mapDatabase(response, link, {
-    isValid: false,
-    missingFields: [],
-    autoCreatedFields: [],
-    notes: [],
-  });
+  let mapped = await retrieveConnectedDatabase(notion, databaseId, link, EMPTY_SCHEMA_STATUS(), preferredDataSourceId);
   const propertiesToCreate: Record<string, object> = {};
   const autoCreatedFields: string[] = [];
   const notes: string[] = [];
@@ -266,13 +373,8 @@ const ensureBalanceSchema = async (
   }
 
   if (Object.keys(propertiesToCreate).length > 0) {
-    await updateDatabaseProperties(notion, mapped.id, propertiesToCreate);
-    mapped = mapDatabase(await retrieveDatabase(notion, mapped.id), link, {
-      isValid: false,
-      missingFields: [],
-      autoCreatedFields: [],
-      notes: [],
-    });
+    await updateDatabaseProperties(notion, mapped.dataSourceId!, propertiesToCreate);
+    mapped = await retrieveConnectedDatabase(notion, mapped.id, link, EMPTY_SCHEMA_STATUS(), mapped.dataSourceId ?? undefined);
   }
 
   mapped.schemaStatus = buildSchemaStatus('balance', mapped, autoCreatedFields, notes);
@@ -282,14 +384,10 @@ const ensureBalanceSchema = async (
 const ensureTransactionsSchema = async (
   notion: Client,
   link: string,
-  response: NotionDatabaseResponse,
+  databaseId: string,
+  preferredDataSourceId?: string,
 ): Promise<Database> => {
-  let mapped = mapDatabase(response, link, {
-    isValid: false,
-    missingFields: [],
-    autoCreatedFields: [],
-    notes: [],
-  });
+  let mapped = await retrieveConnectedDatabase(notion, databaseId, link, EMPTY_SCHEMA_STATUS(), preferredDataSourceId);
   const propertiesToCreate: Record<string, object> = {};
   const autoCreatedFields: string[] = [];
 
@@ -311,13 +409,8 @@ const ensureTransactionsSchema = async (
   }
 
   if (Object.keys(propertiesToCreate).length > 0) {
-    await updateDatabaseProperties(notion, mapped.id, propertiesToCreate);
-    mapped = mapDatabase(await retrieveDatabase(notion, mapped.id), link, {
-      isValid: false,
-      missingFields: [],
-      autoCreatedFields: [],
-      notes: [],
-    });
+    await updateDatabaseProperties(notion, mapped.dataSourceId!, propertiesToCreate);
+    mapped = await retrieveConnectedDatabase(notion, mapped.id, link, EMPTY_SCHEMA_STATUS(), mapped.dataSourceId ?? undefined);
   }
 
   const notes: string[] = [];
@@ -332,14 +425,32 @@ const ensureTransactionsSchema = async (
   return mapped;
 };
 
-export const parseNotionDatabaseId = (link: string): string | null => {
-  const matches = link.match(/[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi);
+export const parseNotionDatabaseId = (value: string): string | null => {
+  const trimmed = value.trim();
+  const looksLikeUrl = /^[a-z][a-z\d+.-]*:\/\//i.test(trimmed) || trimmed.startsWith('www.');
 
-  if (!matches?.length) {
-    return null;
+  if (looksLikeUrl) {
+    try {
+      const url = new URL(trimmed.startsWith('www.') ? `https://${trimmed}` : trimmed);
+      const pathSegments = url.pathname
+        .split('/')
+        .filter(Boolean)
+        .reverse();
+
+      for (const segment of pathSegments) {
+        const match = decodeURIComponent(segment).match(NOTION_PATH_ID_PATTERN);
+        if (match) {
+          return normalizeNotionId(match[1]);
+        }
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
   }
 
-  return normalizeNotionId(matches[0]);
+  return extractNotionId(trimmed);
 };
 
 export const connectNotionDatabase = async (
@@ -347,24 +458,50 @@ export const connectNotionDatabase = async (
   link: string,
   kind: DatabaseKind,
 ): Promise<DatabaseConnectionResult> => {
-  const notion = createClient(apiKey);
-  const databaseId = parseNotionDatabaseId(link);
+  const notion = createNotionClient(apiKey);
+  const notionId = parseNotionDatabaseId(link);
 
-  if (!databaseId) {
-    throw new Error('Could not parse a database id from the provided Notion link.');
+  if (!notionId) {
+    throw new Error('Paste a full Notion database URL or a raw 32-character database/data source ID. Do not paste the v= view ID.');
   }
 
-  const response = await retrieveDatabase(notion, databaseId);
-  const database =
-    kind === 'balance'
-      ? await ensureBalanceSchema(notion, link, response)
-      : await ensureTransactionsSchema(notion, link, response);
+  let database: Database;
+
+  try {
+    database =
+      kind === 'balance'
+        ? await ensureBalanceSchema(notion, link, notionId)
+        : await ensureTransactionsSchema(notion, link, notionId);
+  } catch (error) {
+    if (!isObjectNotFoundError(error)) {
+      throw error;
+    }
+
+    const dataSource = await retrieveDataSource(notion, notionId);
+    if (dataSource.parent?.type !== 'database_id') {
+      throw new Error('The provided data source is not directly attached to a Notion database.');
+    }
+
+    database =
+      kind === 'balance'
+        ? await ensureBalanceSchema(notion, link, dataSource.parent.database_id, dataSource.id)
+        : await ensureTransactionsSchema(notion, link, dataSource.parent.database_id, dataSource.id);
+  }
 
   return {
     database,
     suggestedMapping: kind === 'transactions' ? buildDefaultTransactionsFieldMapping(database) : null,
   };
 };
+
+export const refreshNotionDatabaseConnection = async (
+  notion: Client,
+  database: Database,
+  kind: DatabaseKind,
+): Promise<Database> =>
+  kind === 'balance'
+    ? ensureBalanceSchema(notion, database.link, database.id, database.dataSourceId ?? undefined)
+    : ensureTransactionsSchema(notion, database.link, database.id, database.dataSourceId ?? undefined);
 
 export const getCompatibleProperties = (
   database: Database | null,
@@ -440,22 +577,32 @@ export const ensureTransactionsSyncIdProperty = async (
   notion: Client,
   database: Database,
 ): Promise<Database> => {
-  if (findPropertyByName(database, TRANSACTION_SYNC_ID_PROPERTY)) {
-    return database;
+  const connectedDatabase =
+    database.dataSourceId && database.properties.length > 0
+      ? database
+      : await refreshNotionDatabaseConnection(notion, database, 'transactions');
+
+  if (findPropertyByName(connectedDatabase, TRANSACTION_SYNC_ID_PROPERTY)) {
+    return connectedDatabase;
   }
 
-  await updateDatabaseProperties(notion, database.id, {
+  await updateDatabaseProperties(notion, connectedDatabase.dataSourceId!, {
     [TRANSACTION_SYNC_ID_PROPERTY]: TRANSACTION_AUTO_PROPERTIES[TRANSACTION_SYNC_ID_PROPERTY],
   });
 
-  const response = await retrieveDatabase(notion, database.id);
-  const schemaStatus = database.schemaStatus ?? {
+  const schemaStatus = connectedDatabase.schemaStatus ?? {
     isValid: true,
     missingFields: [],
     autoCreatedFields: [],
     notes: [],
   };
-  const updated = mapDatabase(response, database.link, schemaStatus);
+  const updated = await retrieveConnectedDatabase(
+    notion,
+    connectedDatabase.id,
+    connectedDatabase.link,
+    schemaStatus,
+    connectedDatabase.dataSourceId ?? undefined,
+  );
   updated.schemaStatus = {
     ...schemaStatus,
     autoCreatedFields: Array.from(new Set([...schemaStatus.autoCreatedFields, TRANSACTION_SYNC_ID_PROPERTY])),

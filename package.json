@@ -10,11 +10,11 @@
     "preview": "vite preview"
   },
   "devDependencies": {
-    "@alpinejs/csp": "^3.14.9",
+    "@alpinejs/csp": "^3.15.0",
     "@eslint/js": "^9.25.1",
     "@tailwindcss/vite": "^4.1.4",
     "@types/chrome": "^0.0.317",
-    "alpinejs": "^3.14.9",
+    "alpinejs": "^3.15.0",
     "eslint": "^9.25.1",
     "tailwindcss": "^4.1.4",
     "typescript": "~5.7.2",
@@ -24,6 +24,6 @@
     "vite-tsconfig-paths": "^5.1.4"
   },
   "dependencies": {
-    "@notionhq/client": "^2.3.0"
+    "@notionhq/client": "^5.0.0"
   }
 }

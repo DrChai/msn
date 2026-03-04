@@ -2,7 +2,7 @@ import Alpine from '@alpinejs/csp';
 import { Client } from '@notionhq/client';
 
 import '../global.css';
-import { ensureTransactionsSyncIdProperty, TRANSACTION_SYNC_ID_PROPERTY, validateTransactionsFieldMapping } from '../lib/notion';
+import { createNotionClient, refreshNotionDatabaseConnection, TRANSACTION_SYNC_ID_PROPERTY, validateTransactionsFieldMapping } from '../lib/notion';
 import { getExtensionSettings, saveExtensionSettings } from '../lib/storage';
 
 window.Alpine = Alpine;
@@ -92,7 +92,7 @@ const getPlainTextFromProperty = (property: NotionPageProperty | undefined): str
 
 const getExistingTransactionSyncIds = async (
   notion: Client,
-  databaseId: string,
+  dataSourceId: string,
   dateProperty: string,
   range: { start: string; end: string },
 ): Promise<Set<string>> => {
@@ -100,8 +100,8 @@ const getExistingTransactionSyncIds = async (
   let startCursor: string | undefined;
 
   do {
-    const result = await notion.databases.query({
-      database_id: databaseId,
+    const result = await notion.dataSources.query({
+      data_source_id: dataSourceId,
       filter: {
         and: [
           {
@@ -295,15 +295,6 @@ Alpine.data('popup', () => ({
       return;
     }
 
-    const titleKey = this.balanceDatabase.properties.find((prop) => prop.type === 'title')?.name;
-    const balanceKey = this.balanceDatabase.properties.find((prop) => prop.type === 'number')?.name;
-    const dateKey = this.balanceDatabase.properties.find((prop) => prop.type === 'date')?.name;
-
-    if (!titleKey || !balanceKey || !dateKey) {
-      this.error = 'Balance database is missing a title, number, or date property.';
-      return;
-    }
-
     this.isLoading = true;
     this.error = '';
     this.syncResultMessage = '';
@@ -311,7 +302,7 @@ Alpine.data('popup', () => ({
 
     let notion: Client;
     try {
-      notion = new Client({ auth: this.notionApiKey });
+      notion = createNotionClient(this.notionApiKey);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       window.dispatchEvent(
@@ -323,11 +314,26 @@ Alpine.data('popup', () => ({
     }
 
     try {
+      const balanceDatabase = await refreshNotionDatabaseConnection(notion, this.balanceDatabase, 'balance');
+      this.balanceDatabase = balanceDatabase;
+      await saveExtensionSettings({
+        balanceDatabase,
+      });
+
+      const titleKey = balanceDatabase.properties.find((prop) => prop.type === 'title')?.name;
+      const balanceKey = balanceDatabase.properties.find((prop) => prop.type === 'number')?.name;
+      const dateKey = balanceDatabase.properties.find((prop) => prop.type === 'date')?.name;
+
+      if (!titleKey || !balanceKey || !dateKey || !balanceDatabase.dataSourceId) {
+        this.error = 'Balance database is missing a title, number, date, or data source id.';
+        return;
+      }
+
       await Promise.all(
         this.filteredAccts.map((acct) =>
           notion.pages.create({
             parent: {
-              database_id: this.balanceDatabase!.id,
+              data_source_id: balanceDatabase.dataSourceId!,
             },
             properties: {
               [titleKey]: {
@@ -388,7 +394,7 @@ Alpine.data('popup', () => ({
 
     let notion: Client;
     try {
-      notion = new Client({ auth: this.notionApiKey });
+      notion = createNotionClient(this.notionApiKey);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       window.dispatchEvent(
@@ -400,15 +406,24 @@ Alpine.data('popup', () => ({
     }
 
     try {
-      let transactionsDatabase = this.transactionsDatabase;
-      transactionsDatabase = await ensureTransactionsSyncIdProperty(notion, transactionsDatabase);
+      let transactionsDatabase = await refreshNotionDatabaseConnection(notion, this.transactionsDatabase, 'transactions');
       this.transactionsDatabase = transactionsDatabase;
       await saveExtensionSettings({
         transactionsDatabase,
       });
 
-      const merchantProperty = transactionsDatabase.properties.find((property) => property.name === this.transactionsFieldMapping!.merchantProperty);
-      const syncIdProperty = transactionsDatabase.properties.find((property) => property.name === TRANSACTION_SYNC_ID_PROPERTY);
+      const refreshedMappingErrors = validateTransactionsFieldMapping(this.transactionsFieldMapping, transactionsDatabase);
+      if (refreshedMappingErrors.length > 0) {
+        this.error = refreshedMappingErrors[0];
+        return;
+      }
+
+      const merchantProperty = transactionsDatabase.properties.find(
+        (property) => property.name === this.transactionsFieldMapping!.merchantProperty,
+      );
+      const syncIdProperty = transactionsDatabase.properties.find(
+        (property) => property.name === TRANSACTION_SYNC_ID_PROPERTY,
+      );
 
       if (!merchantProperty || !syncIdProperty) {
         this.error = 'Transactions database is missing either the merchant field or the Sync ID field.';
@@ -430,7 +445,7 @@ Alpine.data('popup', () => ({
 
       const existingSyncIds = await getExistingTransactionSyncIds(
         notion,
-        transactionsDatabase.id,
+        transactionsDatabase.dataSourceId!,
         this.transactionsFieldMapping.dateProperty,
         transactionDateRange,
       );
@@ -474,7 +489,7 @@ Alpine.data('popup', () => ({
 
           return notion.pages.create({
             parent: {
-              database_id: transactionsDatabase.id,
+              data_source_id: transactionsDatabase.dataSourceId!,
             },
             properties,
           });
