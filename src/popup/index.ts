@@ -2,6 +2,7 @@ import Alpine from '@alpinejs/csp';
 import { Client } from '@notionhq/client';
 
 import '../global.css';
+import { detectBankFromHost } from '../lib/bank';
 import { createNotionClient, refreshNotionDatabaseConnection, TRANSACTION_SYNC_ID_PROPERTY, validateTransactionsFieldMapping } from '../lib/notion';
 import { getExtensionSettings, saveExtensionSettings } from '../lib/storage';
 
@@ -404,7 +405,7 @@ Alpine.data('popup', () => ({
     }
 
     try {
-      let transactionsDatabase = await refreshNotionDatabaseConnection(notion, this.transactionsDatabase, 'transactions');
+      const transactionsDatabase = await refreshNotionDatabaseConnection(notion, this.transactionsDatabase, 'transactions');
       this.transactionsDatabase = transactionsDatabase;
       await saveExtensionSettings({
         transactionsDatabase,
@@ -510,164 +511,15 @@ Alpine.data('popup', () => ({
 
 Alpine.start();
 
-const TARGET_DOMAIN = 'cibconline.cibc.com';
-
-const syncAccountTypesFromPage = () => {
-  const accountGroups = document.querySelectorAll('.account-groups-container');
-  const accountTypes: Record<string, string> = {};
-
-  accountGroups.forEach((group) => {
-    const headerElement = group.querySelector('.account-groups-header h2');
-    const groupClass: string = group.classList[1];
-    const groupTitle = (headerElement as HTMLElement | null)?.innerText.trim();
-    if (groupTitle && groupClass) {
-      accountTypes[groupClass] = groupTitle;
-    }
-  });
-
-  return accountTypes;
-};
-
-const getAllAccounts = (selectedTypes: string[]) => {
-  const selector = selectedTypes.map((className) => `.account-groups-container.${className} .card-container`).join(',');
-  const cardContainers = document.querySelectorAll(selector);
-  const accounts: Account[] = [];
-
-  cardContainers.forEach((container) => {
-    const nameElement = container.querySelector('.account-name span');
-    const balanceElement = container.querySelector('.account-balance p');
-
-    const name = nameElement instanceof HTMLElement ? nameElement.innerText.trim() : 'No name found';
-    const balance = balanceElement instanceof HTMLElement ? balanceElement.innerText.trim() : 'No balance found';
-
-    accounts.push({ name, balance });
-  });
-  return accounts;
-};
-
-const getPageMode = () => {
-  const hasTransactions = () =>
-    Boolean(
-      document.querySelector('.transaction-list .merchant-cleansing table tbody tr.transaction-row') ||
-      document.querySelector('.transactions .transaction-list tbody tr.transaction-row'),
-    );
-  const hasBalances = () => Boolean(document.querySelector('.account-groups-container'));
-
-  if (hasTransactions()) {
-    return 'transactions';
-  }
-
-  if (hasBalances()) {
-    return 'balances';
-  }
-  return 'unknown';
-  // return new Promise<'unknown' | 'balances' | 'transactions'>((resolve) => {
-  //   const startedAt = Date.now();
-  //   const intervalId = window.setInterval(() => {
-  //     if (hasTransactions()) {
-  //       window.clearInterval(intervalId);
-  //       resolve('transactions');
-  //       return;
-  //     }
-
-  //     if (hasBalances()) {
-  //       window.clearInterval(intervalId);
-  //       resolve('balances');
-  //       return;
-  //     }
-
-  //     if (Date.now() - startedAt >= 4000) {
-  //       window.clearInterval(intervalId);
-  //       resolve('unknown');
-  //     }
-  //   }, 200);
-  // });
-};
-
-const getTransactionsFromPage = () => {
-  const parseInjectedSignedAmount = (str: string): number => {
-    const normalized = str.replace(/[−–]/g, '-');
-    const parsed = parseFloat(normalized.replace(/[^0-9.-]+/g, ''));
-    return Number.isNaN(parsed) ? 0 : parsed;
-  };
-  const getTransactionRows = () =>
-    Array.from(document.querySelectorAll('tr.transaction-row')).filter(
-      (row) =>
-        Boolean(row.querySelector('.transactionDate span')) && Boolean(row.querySelector('.transactionDescription')) && Boolean(row.querySelector('td.amount')),
-    );
-
-  const parseTransactionDate = (value: string): string => {
-    const parsed = new Date(value);
-    if (Number.isNaN(parsed.getTime())) {
-      return value;
-    }
-
-    const year = parsed.getFullYear();
-    const month = `${parsed.getMonth() + 1}`.padStart(2, '0');
-    const day = `${parsed.getDate()}`.padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  };
-
-  const cardProductName = (document.querySelector('.card-details-main .product-name') as HTMLElement | null)?.innerText.replace(/\s+/g, ' ').trim() ?? '';
-  const buildTransactions = () => {
-    const rows = getTransactionRows();
-
-    return rows.map((row) => {
-      const dateText = (row.querySelector('.transactionDate span') as HTMLElement | null)?.innerText.trim() ?? '';
-      const description = (row.querySelector('.transactionDescription') as HTMLElement | null)?.innerText.trim() ?? '';
-      const maskedCardNumber = (row.querySelector('.transactionCardNo') as HTMLElement | null)?.innerText.trim() ?? '';
-      const amountCell = row.querySelector('td.amount');
-      const amountText = (amountCell?.querySelector('span') as HTMLElement | null)?.innerText.trim() ?? '';
-      const amountClassList = Array.from(amountCell?.classList ?? []);
-      const categoryIcon = row.querySelector('td.transactions img[title]') as HTMLImageElement | null;
-      const category = categoryIcon?.title?.trim() ?? '';
-      const cardLastFour = (maskedCardNumber.match(/(\d{4})$/) ?? [])[1] ?? '';
-      const amountValue = parseInjectedSignedAmount(amountText);
-      const direction = amountClassList.includes('credit') ? 'credit' : amountClassList.includes('debit') ? 'debit' : 'unknown';
-      const accountName =
-        cardProductName && cardLastFour ? `${cardProductName} ${cardLastFour}` : cardLastFour ? `Card ${cardLastFour}` : cardProductName || 'Card';
-
-      return {
-        key: `${dateText}-${amountText}-${description}-${maskedCardNumber}`,
-        date: parseTransactionDate(dateText),
-        amountText,
-        amountValue: Number.isNaN(amountValue) ? 0 : amountValue,
-        cardProductName,
-        merchant: description,
-        description,
-        maskedCardNumber,
-        cardLastFour,
-        accountName,
-        direction,
-        category,
-      } satisfies Transaction;
-    });
-  };
-
-  const initialTransactions = buildTransactions();
-  if (initialTransactions.length > 0) {
-    return Promise.resolve(initialTransactions);
-  }
-
-  return new Promise<Transaction[]>((resolve) => {
-    const startedAt = Date.now();
-    const intervalId = window.setInterval(() => {
-      const transactions = buildTransactions();
-      if (transactions.length > 0) {
-        window.clearInterval(intervalId);
-        resolve(transactions);
-        return;
-      }
-
-      if (Date.now() - startedAt >= 4000) {
-        window.clearInterval(intervalId);
-        resolve([]);
-      }
-    }, 200);
-  });
-};
-
 let isScanningCurrentPage = false;
+
+const dispatchScanError = (detail: string) => {
+  window.dispatchEvent(
+    new CustomEvent('on-error', {
+      detail,
+    }),
+  );
+};
 
 const scanCurrentPage = () => {
   if (isScanningCurrentPage) {
@@ -680,38 +532,28 @@ const scanCurrentPage = () => {
     const currentTab = tabs[0];
     if (!currentTab?.url || !currentTab.id) {
       isScanningCurrentPage = false;
-      window.dispatchEvent(
-        new CustomEvent('on-error', {
-          detail: 'Error: unable to determine the current tab URL.',
-        }),
-      );
+      dispatchScanError('Error: unable to determine the current tab URL.');
       return;
     }
 
     const currentDomain = new URL(currentTab.url).hostname;
-    if (!currentDomain.includes(TARGET_DOMAIN)) {
+    const bankAdapter = detectBankFromHost(currentDomain);
+
+    if (!bankAdapter) {
       isScanningCurrentPage = false;
-      window.dispatchEvent(
-        new CustomEvent('on-error', {
-          detail: `Error: This is not the correct domain. Expected domain: ${TARGET_DOMAIN}`,
-        }),
-      );
+      dispatchScanError('Error: unsupported bank domain. Open a supported bank page and try again.');
       return;
     }
 
     chrome.scripting.executeScript(
       {
         target: { tabId: currentTab.id },
-        func: getPageMode,
+        func: bankAdapter.detectPageMode,
       },
       async (modeResults) => {
         if (chrome.runtime.lastError) {
           isScanningCurrentPage = false;
-          window.dispatchEvent(
-            new CustomEvent('on-error', {
-              detail: `Error: ${chrome.runtime.lastError.message}`,
-            }),
-          );
+          dispatchScanError(`Error: ${chrome.runtime.lastError.message}`);
           return;
         }
 
@@ -721,16 +563,12 @@ const scanCurrentPage = () => {
           chrome.scripting.executeScript(
             {
               target: { tabId: currentTab.id! },
-              func: getTransactionsFromPage,
+              func: bankAdapter.extractTransactions,
             },
             (transactionResults) => {
               isScanningCurrentPage = false;
               if (chrome.runtime.lastError) {
-                window.dispatchEvent(
-                  new CustomEvent('on-error', {
-                    detail: `Error: ${chrome.runtime.lastError.message}`,
-                  }),
-                );
+                dispatchScanError(`Error: ${chrome.runtime.lastError.message}`);
                 return;
               }
 
@@ -747,38 +585,26 @@ const scanCurrentPage = () => {
 
         if (pageMode !== 'balances') {
           isScanningCurrentPage = false;
-          window.dispatchEvent(
-            new CustomEvent('on-error', {
-              detail: 'Error: unsupported CIBC page. Open either an accounts overview page or a credit-card transactions page.',
-            }),
-          );
+          dispatchScanError(`Error: unsupported ${bankAdapter.name} page. Open either an accounts overview page or a transactions page.`);
           return;
         }
 
         chrome.scripting.executeScript(
           {
             target: { tabId: currentTab.id! },
-            func: syncAccountTypesFromPage,
+            func: bankAdapter.extractAccountGroups,
           },
           async (results) => {
             if (chrome.runtime.lastError) {
               isScanningCurrentPage = false;
-              window.dispatchEvent(
-                new CustomEvent('on-error', {
-                  detail: `Error: ${chrome.runtime.lastError.message}`,
-                }),
-              );
+              dispatchScanError(`Error: ${chrome.runtime.lastError.message}`);
               return;
             }
 
             const availableAccounts = results?.[0]?.result;
             if (!availableAccounts) {
               isScanningCurrentPage = false;
-              window.dispatchEvent(
-                new CustomEvent('on-error', {
-                  detail: 'Error: unable to find account sections.',
-                }),
-              );
+              dispatchScanError('Error: unable to find account sections.');
               return;
             }
 
@@ -789,17 +615,13 @@ const scanCurrentPage = () => {
             chrome.scripting.executeScript(
               {
                 target: { tabId: currentTab.id! },
-                func: getAllAccounts,
+                func: bankAdapter.extractAccounts,
                 args: [selectedAccounts],
               },
               (accountResults) => {
                 isScanningCurrentPage = false;
                 if (chrome.runtime.lastError) {
-                  window.dispatchEvent(
-                    new CustomEvent('on-error', {
-                      detail: `Error: ${chrome.runtime.lastError.message}`,
-                    }),
-                  );
+                  dispatchScanError(`Error: ${chrome.runtime.lastError.message}`);
                   return;
                 }
 
@@ -823,7 +645,7 @@ const scanCurrentPage = () => {
 //
 // chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 //   if (changeInfo.status === 'complete' && tab.url) {
-//     const pageMode = getPageMode();
+//     const pageMode = bankAdapter.detectPageMode();
 //     console.log(`Tab ${tabId} changed to: ${tab.url}`, pageMode);
 //     scanCurrentPage();
 //   }
