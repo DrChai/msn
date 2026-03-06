@@ -53,7 +53,7 @@ const cibcExtractAccounts: InjectedPageFn<[selectedGroupKeys: string[]], Account
   return accounts;
 };
 
-const cibcExtractTransactions: InjectedPageFn<[], Promise<Transaction[]>> = () => {
+const cibcExtractTransactions: InjectedPageFn<[], Transaction[]> = () => {
   const parseSignedAmount = (value: string): number => {
     const normalized = value.replace(/[−–]/g, '-');
     const parsed = parseFloat(normalized.replace(/[^0-9.-]+/g, ''));

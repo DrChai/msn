@@ -29,5 +29,5 @@ export interface BankAdapter {
   detectPageMode: InjectedPageFn<[], BankPageMode>;
   extractAccountGroups: InjectedPageFn<[], AccountGroupMap>;
   extractAccounts: InjectedPageFn<[selectedGroupKeys: string[]], Account[]>;
-  extractTransactions: InjectedPageFn<[], Transaction[] | Promise<Transaction[]>>;
+  extractTransactions: InjectedPageFn<[], Transaction[]>;
 }
