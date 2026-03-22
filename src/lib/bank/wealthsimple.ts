@@ -7,6 +7,69 @@ const wealthsimpleDetectPageMode: InjectedPageFn<[], BankPageMode> = () => {
   const hasMatchingElement = (selectors: string[]) => selectors.some((selector) => Boolean(document.querySelector(selector)));
   const isWealthsimpleAccountLabel = (text: string) =>
     text === 'Chequing' || text.startsWith('Credit card • ') || text.startsWith('Joint chequing • ');
+  const hasWealthsimpleHomeAccounts = () =>
+    Array.from(document.querySelectorAll('a[href^="/app/account-details/"]')).some((link) => {
+      if (!(link instanceof HTMLAnchorElement)) {
+        return false;
+      }
+
+      const labelledBy = link.getAttribute('aria-labelledby');
+      const contentRoot = labelledBy ? document.getElementById(labelledBy) ?? link : link;
+      const text = contentRoot.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+      return Boolean(text) && /\$[\d,]+(?:\.\d{2})?/.test(text);
+    });
+  const hasWealthsimpleBalanceAccounts = () => {
+    const isCurrencyLine = (text: string) => /[-+−–]?\s*\$[\d,]+(?:\.\d{2})?(?:\s*[A-Z]{3})?/.test(text);
+    const isNoiseLine = (text: string) => {
+      const normalized = text.toLowerCase();
+      return (
+        normalized === 'today' ||
+        normalized === 'yesterday' ||
+        normalized.includes('recent activity') ||
+        normalized.includes('transaction history') ||
+        normalized.includes('purchase') ||
+        normalized.includes('direct deposit') ||
+        normalized.includes('interac e-transfer') ||
+        normalized.includes('pre-authorized debit') ||
+        normalized.includes('transfer out')
+      );
+    };
+    const isLikelyAccountLabel = (text: string) => {
+      const normalized = text.toLowerCase();
+      return (
+        normalized === 'chequing' ||
+        normalized.startsWith('joint chequing') ||
+        normalized.includes('credit card') ||
+        normalized.includes('cash') ||
+        normalized.includes('tfsa') ||
+        normalized.includes('rrsp') ||
+        normalized.includes('fhsa') ||
+        normalized.includes('resp') ||
+        normalized.includes('invest') ||
+        normalized.includes('save')
+      );
+    };
+
+    return Array.from(
+      document.querySelectorAll(
+        'button, a, [role="button"], [data-testid*="account"], [data-testid*="holding"], [data-testid*="portfolio"], [data-testid*="product"]',
+      ),
+    ).some((element) => {
+      if (!(element instanceof HTMLElement)) {
+        return false;
+      }
+
+      const lines = element.innerText
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+      const amount = lines.find(isCurrencyLine);
+      const label = lines.find((line) => isLikelyAccountLabel(line) && !isNoiseLine(line));
+
+      return Boolean(amount && label);
+    });
+  };
   const hasWealthsimpleCreditCardTransactions = () =>
     Array.from(document.querySelectorAll('button[aria-controls][id$="-header"]')).some((button) => {
       if (!(button instanceof HTMLElement)) {
@@ -54,12 +117,15 @@ const wealthsimpleDetectPageMode: InjectedPageFn<[], BankPageMode> = () => {
   }
 
   if (
-    (pathname.includes('/accounts') ||
+    (hasWealthsimpleHomeAccounts() ||
+      hasWealthsimpleBalanceAccounts() ||
+      pathname.includes('/app/home') ||
+      pathname.includes('/accounts') ||
       pathname.includes('/portfolio') ||
       pathname.includes('/invest') ||
       pageText.includes('net worth') ||
       pageText.includes('holdings')) &&
-    hasMatchingElement(balanceSelectors)
+    (hasWealthsimpleHomeAccounts() || hasMatchingElement(balanceSelectors))
   ) {
     return 'balances';
   }
@@ -68,9 +134,17 @@ const wealthsimpleDetectPageMode: InjectedPageFn<[], BankPageMode> = () => {
 };
 
 const wealthsimpleExtractAccountGroups: InjectedPageFn<[], AccountGroupMap> = () => {
-  const containers = document.querySelectorAll(
-    '[data-testid*="account"], [data-testid*="holding"], [data-testid*="portfolio"], [role="table"], table',
-  );
+  const accountLinks = Array.from(document.querySelectorAll('a[href^="/app/account-details/"]'));
+  const containers = accountLinks.filter((element) => {
+    if (!(element instanceof HTMLAnchorElement)) {
+      return false;
+    }
+
+    const labelledBy = element.getAttribute('aria-labelledby');
+    const contentRoot = labelledBy ? document.getElementById(labelledBy) ?? element : element;
+    const text = contentRoot.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+    return Boolean(text) && /\$[\d,]+(?:\.\d{2})?/.test(text);
+  });
 
   if (containers.length === 0) {
     return {} as AccountGroupMap;
@@ -87,31 +161,104 @@ const wealthsimpleExtractAccounts: InjectedPageFn<[selectedGroupKeys: string[]],
     return [];
   }
 
-  const containers = Array.from(
-    document.querySelectorAll(
-      '[data-testid*="account"], [data-testid*="holding"], [data-testid*="portfolio"], [role="table"], table',
-    ),
-  );
+  const isCurrencyLine = (text: string) => /[-+−–]?\s*\$[\d,]+(?:\.\d{2})?(?:\s*[A-Z]{3})?/.test(text);
+  const isPerformanceLine = (text: string) => /(?:all time|today|this month|this year|action required|bi-weekly)/i.test(text);
+  const isCountLine = (text: string) => /^\d+\s+accounts?$/i.test(text);
+  const isStatusLine = (text: string) =>
+    /^(managed|alt investments|crypto|action required)$/i.test(text.trim());
+  const isNoiseLine = (text: string) => {
+    const normalized = text.toLowerCase();
+    return (
+      normalized === 'today' ||
+      normalized === 'yesterday' ||
+      normalized.includes('recent activity') ||
+      normalized.includes('transaction history') ||
+      isCountLine(text) ||
+      isPerformanceLine(text) ||
+      isStatusLine(text)
+    );
+  };
+  const getElementLines = (element: Element | null): string[] => {
+    if (!(element instanceof HTMLElement)) {
+      return [];
+    }
+
+    return element.innerText
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+  };
+  const getGroupTitle = (link: HTMLAnchorElement): string => {
+    const region = link.closest('[role="region"]');
+    if (!(region instanceof HTMLElement)) {
+      return '';
+    }
+
+    const labelledBy = region.getAttribute('aria-labelledby');
+    if (!labelledBy) {
+      return '';
+    }
+
+    const header = document.getElementById(labelledBy);
+    const headerLines = getElementLines(header);
+    return headerLines.find((line) => !isNoiseLine(line) && !isCurrencyLine(line)) ?? '';
+  };
+  const buildAccountName = (primaryName: string, secondaryName: string, groupTitle: string): string => {
+    const normalizedPrimary = primaryName.toLowerCase();
+    const normalizedSecondary = secondaryName.toLowerCase();
+    const normalizedGroup = groupTitle.toLowerCase();
+
+    if (
+      secondaryName &&
+      normalizedSecondary !== normalizedPrimary &&
+      !isNoiseLine(secondaryName) &&
+      !isCurrencyLine(secondaryName)
+    ) {
+      return `${primaryName} • ${secondaryName}`;
+    }
+
+    if (
+      groupTitle &&
+      normalizedGroup !== normalizedPrimary &&
+      !normalizedPrimary.includes(normalizedGroup) &&
+      !isNoiseLine(groupTitle)
+    ) {
+      return `${groupTitle} • ${primaryName}`;
+    }
+
+    return primaryName;
+  };
+
+  const containers = Array.from(document.querySelectorAll('a[href^="/app/account-details/"]'));
   const seen = new Set<string>();
   const accounts: Account[] = [];
 
   containers.forEach((container, index) => {
-    if (!(container instanceof HTMLElement)) {
+    if (!(container instanceof HTMLAnchorElement)) {
       return;
     }
 
-    const lines = container.innerText
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean);
+    const labelledBy = container.getAttribute('aria-labelledby');
+    const contentRoot = labelledBy ? document.getElementById(labelledBy) ?? container : container;
+    const lines = getElementLines(contentRoot);
 
     if (lines.length === 0) {
       return;
     }
 
-    const balance = lines.find((line) => /[-+−–]?\$[\d,]+(?:\.\d{2})?/.test(line)) ?? '';
-    const name = lines.find((line) => line !== balance) ?? `Wealthsimple account ${index + 1}`;
-    const dedupeKey = `${name}|${balance}`;
+    const balance = lines.find(isCurrencyLine) ?? '';
+    const contentLines = lines.filter((line) => line !== balance && !isNoiseLine(line) && !isCurrencyLine(line));
+    const primaryName = contentLines[0] ?? `Wealthsimple account ${index + 1}`;
+    const secondaryName = contentLines[1] ?? '';
+    const groupTitle = getGroupTitle(container);
+    const name = buildAccountName(primaryName, secondaryName, groupTitle);
+    const key = container.getAttribute('href') ?? `${name}-${index}`;
+
+    if (!balance || !name || isNoiseLine(name)) {
+      return;
+    }
+
+    const dedupeKey = key;
 
     if (seen.has(dedupeKey)) {
       return;
@@ -119,6 +266,7 @@ const wealthsimpleExtractAccounts: InjectedPageFn<[selectedGroupKeys: string[]],
 
     seen.add(dedupeKey);
     accounts.push({
+      key,
       name,
       balance,
     });
@@ -129,7 +277,27 @@ const wealthsimpleExtractAccounts: InjectedPageFn<[selectedGroupKeys: string[]],
 
 const wealthsimpleExtractTransactions: InjectedPageFn<[], Transaction[]> = () => {
   const isWealthsimpleAccountLabel = (text: string) =>
-    text === 'Chequing' || text.startsWith('Credit card • ') || text.startsWith('Joint chequing • ');
+    text === 'Chequing' ||
+    text.startsWith('Credit card • ') ||
+    text.startsWith('Joint chequing • ') ||
+    /saving|save/i.test(text);
+  const inferAccountType = (accountLabel: string): TransactionAccountType => {
+    const normalized = accountLabel.trim().toLowerCase();
+
+    if (normalized.startsWith('credit card')) {
+      return 'credit_card';
+    }
+
+    if (normalized === 'chequing' || normalized.startsWith('joint chequing')) {
+      return 'checking';
+    }
+
+    if (normalized.includes('saving') || normalized.includes('save')) {
+      return 'savings';
+    }
+
+    return 'unknown';
+  };
 
   const parseSignedAmount = (value: string): number => {
     const normalized = value.replace(/[−–]/g, '-');
@@ -257,6 +425,7 @@ const wealthsimpleExtractTransactions: InjectedPageFn<[], Transaction[]> = () =>
       const merchant = contentTexts[0] ?? `Transaction ${index + 1}`;
       const detail = contentTexts[1] ?? '';
       const accountName = accountLabel.includes('•') ? accountLabel.split('•').pop()?.trim() ?? accountLabel : accountLabel;
+      const accountType = inferAccountType(accountLabel);
       const amountValue = parseSignedAmount(amountText);
       const direction = amountValue < 0 ? 'debit' : amountValue > 0 ? 'credit' : 'unknown';
       const dateText = currentDateText || findNearestDateHeadingText(element);
@@ -272,6 +441,7 @@ const wealthsimpleExtractTransactions: InjectedPageFn<[], Transaction[]> = () =>
         maskedCardNumber: '',
         cardLastFour: '',
         accountName,
+        accountType,
         direction,
         category: detail,
       });

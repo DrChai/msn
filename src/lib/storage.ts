@@ -6,6 +6,7 @@ const STORAGE_KEYS = [
   'balanceDatabase',
   'transactionsDatabase',
   'transactionsFieldMapping',
+  'invertTransactionSigns',
   'balanceDatabaseLinkDraft',
   'transactionsDatabaseLinkDraft',
 ] as const;
@@ -24,6 +25,31 @@ const badgeClassForType = (type: string): string => {
       return 'bg-gray-100 text-gray-800';
   }
 };
+
+const normalizeAvailableAccounts = (availableAccounts: unknown): Record<string, string> => {
+  if (!availableAccounts || typeof availableAccounts !== 'object' || Array.isArray(availableAccounts)) {
+    return {};
+  }
+
+  return Object.entries(availableAccounts).reduce<Record<string, string>>((result, [key, value]) => {
+    if (typeof key !== 'string' || typeof value !== 'string') {
+      return result;
+    }
+
+    result[key] = value;
+    return result;
+  }, {});
+};
+
+const normalizeSelectedAccounts = (selectedAccounts: unknown): string[] => {
+  if (!Array.isArray(selectedAccounts)) {
+    return [];
+  }
+
+  return Array.from(new Set(selectedAccounts.filter((value): value is string => typeof value === 'string')));
+};
+
+const normalizeBoolean = (value: unknown, fallback = false): boolean => (typeof value === 'boolean' ? value : fallback);
 
 const normalizeDatabaseProperties = (properties: unknown): DatabaseProperty[] => {
   if (Array.isArray(properties)) {
@@ -77,6 +103,7 @@ const EMPTY_SETTINGS: ExtensionSettings = {
   balanceDatabase: null,
   transactionsDatabase: null,
   transactionsFieldMapping: null,
+  invertTransactionSigns: false,
   balanceDatabaseLinkDraft: '',
   transactionsDatabaseLinkDraft: '',
 };
@@ -89,6 +116,8 @@ export const getExtensionSettings = async (): Promise<ExtensionSettings> => {
   const stored = (await chrome.storage.local.get([...STORAGE_KEYS])) as RawSettings;
   const legacyDatabase = stored.selectedDatabase ?? null;
   const balanceDatabase = normalizeDatabase(stored.balanceDatabase ?? legacyDatabase);
+  const availableAccounts = normalizeAvailableAccounts(stored.availableAccounts);
+  const selectedAccounts = normalizeSelectedAccounts(stored.selectedAccounts);
 
   if (legacyDatabase && !stored.balanceDatabase) {
     await chrome.storage.local.set({
@@ -98,12 +127,13 @@ export const getExtensionSettings = async (): Promise<ExtensionSettings> => {
   }
 
   return {
-    availableAccounts: stored.availableAccounts ?? EMPTY_SETTINGS.availableAccounts,
-    selectedAccounts: stored.selectedAccounts ?? EMPTY_SETTINGS.selectedAccounts,
+    availableAccounts,
+    selectedAccounts,
     notionApiKey: stored.notionApiKey ?? EMPTY_SETTINGS.notionApiKey,
     balanceDatabase,
     transactionsDatabase: normalizeDatabase(stored.transactionsDatabase ?? EMPTY_SETTINGS.transactionsDatabase),
     transactionsFieldMapping: stored.transactionsFieldMapping ?? EMPTY_SETTINGS.transactionsFieldMapping,
+    invertTransactionSigns: normalizeBoolean(stored.invertTransactionSigns, EMPTY_SETTINGS.invertTransactionSigns),
     balanceDatabaseLinkDraft: stored.balanceDatabaseLinkDraft ?? balanceDatabase?.link ?? EMPTY_SETTINGS.balanceDatabaseLinkDraft,
     transactionsDatabaseLinkDraft:
       stored.transactionsDatabaseLinkDraft ??

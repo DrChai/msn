@@ -14,9 +14,11 @@ interface Window {
 }
 
 type Account = {
+  key?: string;
   name: string;
   balance: string;
 };
+type TransactionAccountType = 'credit_card' | 'checking' | 'savings' | 'unknown';
 type Transaction = {
   key: string;
   date: string;
@@ -28,6 +30,7 @@ type Transaction = {
   maskedCardNumber: string;
   cardLastFour: string;
   accountName: string;
+  accountType: TransactionAccountType;
   direction: 'credit' | 'debit' | 'unknown';
   category: string;
 };
@@ -69,6 +72,7 @@ type ExtensionSettings = {
   balanceDatabase: Database | null;
   transactionsDatabase: Database | null;
   transactionsFieldMapping: TransactionsFieldMapping | null;
+  invertTransactionSigns: boolean;
   balanceDatabaseLinkDraft: string;
   transactionsDatabaseLinkDraft: string;
 };

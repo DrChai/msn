@@ -107,6 +107,7 @@ const cibcExtractTransactions: InjectedPageFn<[], Transaction[]> = () => {
         maskedCardNumber,
         cardLastFour,
         accountName,
+        accountType: 'credit_card',
         direction,
         category,
       };

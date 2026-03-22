@@ -49,6 +49,57 @@ const createTransactionSyncId = async (transaction: Transaction): Promise<string
 
   return sha256Hex(seed);
 };
+const getTransactionAccountTypeLabel = (accountType: TransactionAccountType): string => {
+  switch (accountType) {
+    case 'credit_card':
+      return 'Credit card';
+    case 'checking':
+      return 'Checking';
+    case 'savings':
+      return 'Savings';
+    default:
+      return 'Unknown';
+  }
+};
+const getTransactionCurrencyCode = (transaction: Transaction): string | null => {
+  const currencyMatch = transaction.amountText.match(/\b([A-Z]{3})\b/);
+  return currencyMatch?.[1] ?? null;
+};
+const getDefaultTransactionAmount = (transaction: Transaction): number => {
+  const magnitude = Math.abs(transaction.amountValue);
+
+  if (transaction.direction === 'debit') {
+    return -magnitude;
+  }
+
+  if (transaction.direction === 'credit') {
+    return magnitude;
+  }
+
+  if (transaction.accountType === 'credit_card') {
+    return transaction.amountValue > 0 ? -magnitude : magnitude;
+  }
+
+  return transaction.amountValue < 0 ? -magnitude : magnitude;
+};
+const getEffectiveTransactionAmount = (transaction: Transaction, invertTransactionSigns: boolean): number => {
+  const defaultAmount = getDefaultTransactionAmount(transaction);
+  return invertTransactionSigns ? defaultAmount * -1 : defaultAmount;
+};
+const formatTransactionAmount = (transaction: Transaction, invertTransactionSigns: boolean): string => {
+  const amount = getEffectiveTransactionAmount(transaction, invertTransactionSigns);
+  const currencyCode = getTransactionCurrencyCode(transaction);
+  const formatter = new Intl.NumberFormat(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  const absAmount = formatter.format(Math.abs(amount));
+  const signPrefix = amount < 0 ? '- ' : '';
+  const currencyPrefix = currencyCode === 'USD' ? 'US$' : '$';
+  const currencySuffix = currencyCode ? ` ${currencyCode}` : '';
+
+  return `${signPrefix}${currencyPrefix}${absAmount}${currencySuffix}`;
+};
 type NotionTextFragment = {
   plain_text?: string;
 };
@@ -65,6 +116,28 @@ type NotionQueryPage = {
 
 type NotionPageCreateRequest = Parameters<Client['pages']['create']>[0];
 type NotionPageCreateProperties = NonNullable<NotionPageCreateRequest['properties']>;
+type BalanceAccountsUpdateDetail = {
+  accounts: Account[];
+  selectedAccountKeys: string[];
+};
+
+const getAccountSelectionKey = (account: Account): string => account.key?.trim() || account.name;
+const buildAvailableAccountsMap = (accounts: Account[]): Record<string, string> => {
+  const nameCounts = accounts.reduce<Record<string, number>>((result, account) => {
+    result[account.name] = (result[account.name] ?? 0) + 1;
+    return result;
+  }, {});
+
+  return Object.fromEntries(
+    accounts.map((account) => {
+      const isDuplicateName = (nameCounts[account.name] ?? 0) > 1;
+      const title = isDuplicateName ? `${account.name} (${account.balance})` : account.name;
+      return [getAccountSelectionKey(account), title];
+    }),
+  );
+};
+const matchesStoredAccountSelection = (account: Account, selectedAccounts: string[]): boolean =>
+  selectedAccounts.includes(getAccountSelectionKey(account)) || selectedAccounts.includes(account.name);
 
 const getTransactionsDateRange = (transactions: Transaction[]): { start: string; end: string } | null => {
   const dates = transactions
@@ -136,7 +209,9 @@ const getExistingTransactionSyncIds = async (
 
 Alpine.data('popup', () => ({
   filteredAccts: [] as Account[],
+  selectedAccounts: [] as string[],
   detectedTransactions: [] as Transaction[],
+  invertTransactionSigns: false,
   isLoading: false,
   error: '',
   syncResultMessage: '',
@@ -153,6 +228,25 @@ Alpine.data('popup', () => ({
     this.balanceDatabase = settings.balanceDatabase;
     this.transactionsDatabase = settings.transactionsDatabase;
     this.transactionsFieldMapping = settings.transactionsFieldMapping;
+    this.invertTransactionSigns = settings.invertTransactionSigns;
+    this.selectedAccounts = settings.selectedAccounts;
+
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local') {
+        return;
+      }
+
+      if (!changes.selectedAccounts && !changes.availableAccounts && !changes.invertTransactionSigns) {
+        return;
+      }
+
+      getExtensionSettings()
+        .then((updatedSettings) => {
+          this.selectedAccounts = updatedSettings.selectedAccounts;
+          this.invertTransactionSigns = updatedSettings.invertTransactionSigns;
+        })
+        .catch(() => {});
+    });
   },
   get syncBtnText() {
     if (this.isLoading) {
@@ -186,7 +280,13 @@ Alpine.data('popup', () => ({
     return this.transactionsDatabase.schemaStatus?.isValid ? 'Ready' : 'Needs attention';
   },
   get canSyncBalanceState() {
-    return Boolean(this.balanceDatabase && this.notionApiKey && this.balanceDatabase.schemaStatus?.isValid && !this.isLoading && this.filteredAccts.length > 0);
+    return Boolean(
+      this.balanceDatabase &&
+        this.notionApiKey &&
+        this.balanceDatabase.schemaStatus?.isValid &&
+        !this.isLoading &&
+        this.selectedBalanceAccounts.length > 0,
+    );
   },
   get canSyncTransactionsState() {
     if (!this.transactionsDatabase || !this.notionApiKey || !this.transactionsDatabase.schemaStatus?.isValid || this.isLoading) {
@@ -208,6 +308,20 @@ Alpine.data('popup', () => ({
   get balanceDatabaseTitle() {
     return this.balanceDatabase ? this.balanceDatabase.title : 'Not connected';
   },
+  get balanceAccountOptions() {
+    return this.filteredAccts.map((account: Account) => ({
+      ...account,
+      key: getAccountSelectionKey(account),
+      isSelected: this.selectedAccounts.includes(getAccountSelectionKey(account)),
+    }));
+  },
+  get selectedBalanceAccounts() {
+    const selectedAccountSet = new Set(this.selectedAccounts);
+    return this.filteredAccts.filter((account: Account) => selectedAccountSet.has(getAccountSelectionKey(account)));
+  },
+  get selectedBalanceCountText() {
+    return `${this.selectedBalanceAccounts.length} of ${this.filteredAccts.length} account${this.filteredAccts.length === 1 ? '' : 's'} selected`;
+  },
   get transactionsDatabaseTitle() {
     return this.transactionsDatabase ? this.transactionsDatabase.title : 'Not connected';
   },
@@ -215,10 +329,29 @@ Alpine.data('popup', () => ({
     return this.detectedTransactions.length > 0;
   },
   get transactionsPreview() {
-    return this.detectedTransactions.slice(0, 3);
+    return this.detectedTransactions.map((transaction: Transaction) => ({
+      ...transaction,
+      previewAmountText: formatTransactionAmount(transaction, this.invertTransactionSigns),
+      previewDirectionText: getEffectiveTransactionAmount(transaction, this.invertTransactionSigns) < 0 ? 'Expense' : 'Income',
+      accountTypeLabel: getTransactionAccountTypeLabel(transaction.accountType),
+    }));
   },
   get transactionsPreviewCountText() {
     return `${this.detectedTransactions.length} transaction${this.detectedTransactions.length === 1 ? '' : 's'} detected`;
+  },
+  get detectedTransactionsAccountTypeText() {
+    if (this.detectedTransactions.length === 0) {
+      return 'Unknown';
+    }
+
+    const uniqueAccountTypes = Array.from(
+      new Set<TransactionAccountType>(this.detectedTransactions.map((transaction: Transaction) => transaction.accountType)),
+    );
+    if (uniqueAccountTypes.length === 1) {
+      return getTransactionAccountTypeLabel(uniqueAccountTypes[0] ?? 'unknown');
+    }
+
+    return uniqueAccountTypes.map((accountType: TransactionAccountType) => getTransactionAccountTypeLabel(accountType)).join(', ');
   },
   get showingBalances() {
     return this.pageMode === 'balances';
@@ -261,11 +394,12 @@ Alpine.data('popup', () => ({
     this.error = '';
     this.syncResultMessage = '';
   },
-  afterAccountsUpdate(event: CustomEvent<Account[]>) {
+  afterAccountsUpdate(event: CustomEvent<BalanceAccountsUpdateDetail>) {
     this.isLoading = false;
     this.pageMode = 'balances';
     if (event.detail) {
-      this.filteredAccts = event.detail;
+      this.filteredAccts = event.detail.accounts;
+      this.selectedAccounts = event.detail.selectedAccountKeys;
       this.detectedTransactions = [];
     }
   },
@@ -282,6 +416,22 @@ Alpine.data('popup', () => ({
     this.error = '';
     this.syncResultMessage = '';
     chrome.runtime.openOptionsPage();
+  },
+  async onInvertTransactionSignsChange() {
+    await saveExtensionSettings({
+      invertTransactionSigns: this.invertTransactionSigns,
+    });
+  },
+  async onBalanceSelectionChange() {
+    const selectedAccounts = this.filteredAccts
+      .map((account: Account) => getAccountSelectionKey(account))
+      .filter((accountKey: string) => this.selectedAccounts.includes(accountKey));
+
+    this.selectedAccounts = selectedAccounts;
+    await saveExtensionSettings({
+      availableAccounts: buildAvailableAccountsMap(this.filteredAccts),
+      selectedAccounts,
+    });
   },
   async onSync() {
     if (this.showingTransactions) {
@@ -329,7 +479,7 @@ Alpine.data('popup', () => ({
       }
 
       await Promise.all(
-        this.filteredAccts.map((acct: Account) =>
+        this.selectedBalanceAccounts.map((acct: Account) =>
           notion.pages.create({
             parent: {
               data_source_id: balanceDatabase.dataSourceId!,
@@ -361,7 +511,7 @@ Alpine.data('popup', () => ({
         ),
       );
       this.syncBtnTitle = 'Synced';
-      this.syncResultMessage = `Created ${this.filteredAccts.length} balance item${this.filteredAccts.length === 1 ? '' : 's'}.`;
+      this.syncResultMessage = `Created ${this.selectedBalanceAccounts.length} balance item${this.selectedBalanceAccounts.length === 1 ? '' : 's'}.`;
       window.dispatchEvent(new CustomEvent('after-accounts-update', {}));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -477,7 +627,7 @@ Alpine.data('popup', () => ({
             },
             [this.transactionsFieldMapping!.amountProperty]: {
               type: 'number',
-              number: transaction.amountValue,
+              number: getEffectiveTransactionAmount(transaction, this.invertTransactionSigns),
             },
             [this.transactionsFieldMapping!.accountNameProperty]: toRichText(transaction.accountName),
             [TRANSACTION_SYNC_ID_PROPERTY]: toRichText(syncId),
@@ -608,15 +758,15 @@ const scanCurrentPage = () => {
               return;
             }
 
-            chrome.storage.local.set({ availableAccounts });
             const settings = await getExtensionSettings();
-            const selectedAccounts = settings.selectedAccounts.length ? settings.selectedAccounts : Object.keys(availableAccounts);
+            const allGroupKeys = Object.keys(availableAccounts);
+            const legacySelectedGroupKeys = allGroupKeys.filter((groupKey) => settings.selectedAccounts.includes(groupKey));
 
             chrome.scripting.executeScript(
               {
                 target: { tabId: currentTab.id! },
                 func: bankAdapter.extractAccounts,
-                args: [selectedAccounts],
+                args: [allGroupKeys],
               },
               (accountResults) => {
                 isScanningCurrentPage = false;
@@ -625,11 +775,78 @@ const scanCurrentPage = () => {
                   return;
                 }
 
-                const accounts = accountResults?.[0]?.result as Account[];
-                window.dispatchEvent(
-                  new CustomEvent('after-accounts-update', {
-                    detail: accounts,
-                  }),
+                const accounts = (accountResults?.[0]?.result ?? []) as Account[];
+                if (accounts.length === 0) {
+                  dispatchScanError(`Error: unable to find any ${bankAdapter.name} accounts on the current balances page.`);
+                  return;
+                }
+
+                const accountKeys = accounts.map((account) => getAccountSelectionKey(account));
+                const matchedSelectedAccountKeys = accounts
+                  .filter((account) => matchesStoredAccountSelection(account, settings.selectedAccounts))
+                  .map((account) => getAccountSelectionKey(account));
+                const shouldDefaultToAllAccounts =
+                  settings.selectedAccounts.length === 0
+                    ? Object.keys(settings.availableAccounts).length === 0
+                    : matchedSelectedAccountKeys.length === 0 && legacySelectedGroupKeys.length === 0;
+
+                const finalizeAccountSelection = async (selectedAccountKeys: string[]) => {
+                  const normalizedSelectedAccountKeys = accountKeys.filter((accountKey) => selectedAccountKeys.includes(accountKey));
+
+                  await saveExtensionSettings({
+                    availableAccounts: buildAvailableAccountsMap(accounts),
+                    selectedAccounts: normalizedSelectedAccountKeys,
+                  });
+
+                  window.dispatchEvent(
+                    new CustomEvent<BalanceAccountsUpdateDetail>('after-accounts-update', {
+                      detail: {
+                        accounts,
+                        selectedAccountKeys: normalizedSelectedAccountKeys,
+                      },
+                    }),
+                  );
+                };
+
+                if (matchedSelectedAccountKeys.length > 0) {
+                  finalizeAccountSelection(matchedSelectedAccountKeys).catch((error) => {
+                    const message = error instanceof Error ? error.message : String(error);
+                    dispatchScanError(`Error: ${message}`);
+                  });
+                  return;
+                }
+
+                if (legacySelectedGroupKeys.length === 0) {
+                  const defaultSelectedAccountKeys = shouldDefaultToAllAccounts ? accountKeys : [];
+                  finalizeAccountSelection(defaultSelectedAccountKeys).catch((error) => {
+                    const message = error instanceof Error ? error.message : String(error);
+                    dispatchScanError(`Error: ${message}`);
+                  });
+                  return;
+                }
+
+                chrome.scripting.executeScript(
+                  {
+                    target: { tabId: currentTab.id! },
+                    func: bankAdapter.extractAccounts,
+                    args: [legacySelectedGroupKeys],
+                  },
+                  (legacyAccountResults) => {
+                    if (chrome.runtime.lastError) {
+                      dispatchScanError(`Error: ${chrome.runtime.lastError.message}`);
+                      return;
+                    }
+
+                    const legacyAccounts = (legacyAccountResults?.[0]?.result ?? []) as Account[];
+                    const legacySelectedAccountKeys = accountKeys.filter((accountKey) =>
+                      legacyAccounts.some((account) => getAccountSelectionKey(account) === accountKey || account.name === accountKey),
+                    );
+
+                    finalizeAccountSelection(legacySelectedAccountKeys.length > 0 ? legacySelectedAccountKeys : accountKeys).catch((error) => {
+                      const message = error instanceof Error ? error.message : String(error);
+                      dispatchScanError(`Error: ${message}`);
+                    });
+                  },
                 );
               },
             );

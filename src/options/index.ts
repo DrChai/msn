@@ -74,6 +74,38 @@ Alpine.data('accountOptions', () => ({
   async init() {
     const settings = await getExtensionSettings();
 
+    this.applySettingsSnapshot(settings);
+    this.refreshTransactionsMappingState();
+    this.refreshSaveHint();
+
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local') {
+        return;
+      }
+
+      if (
+        !changes.availableAccounts &&
+        !changes.selectedAccounts &&
+        !changes.notionApiKey &&
+        !changes.balanceDatabase &&
+        !changes.transactionsDatabase &&
+        !changes.transactionsFieldMapping &&
+        !changes.balanceDatabaseLinkDraft &&
+        !changes.transactionsDatabaseLinkDraft
+      ) {
+        return;
+      }
+
+      getExtensionSettings()
+        .then((updatedSettings) => {
+          this.applySettingsSnapshot(updatedSettings);
+          this.refreshTransactionsMappingState();
+          this.refreshSaveHint();
+        })
+        .catch(() => {});
+    });
+  },
+  applySettingsSnapshot(settings: ExtensionSettings) {
     this.availableAccounts = Object.entries(settings.availableAccounts).map(([className, title]) => ({ className, title }));
     this.selectedAccounts = settings.selectedAccounts;
     this.notionApiKey = settings.notionApiKey;
@@ -82,8 +114,6 @@ Alpine.data('accountOptions', () => ({
     this.transactionsFieldMapping = normalizeTransactionsFieldMapping(settings.transactionsFieldMapping);
     this.balanceState.link = settings.balanceDatabaseLinkDraft;
     this.transactionsState.link = settings.transactionsDatabaseLinkDraft;
-    this.refreshTransactionsMappingState();
-    this.refreshSaveHint();
   },
   get balanceConnectButtonLabel() {
     return this.balanceState.isConnecting ? 'Connecting...' : 'Connect';
@@ -173,6 +203,12 @@ Alpine.data('accountOptions', () => ({
   get noSaveHint() {
     return !this.hasSaveHint;
   },
+  get hasAvailableAccounts() {
+    return this.availableAccounts.length > 0;
+  },
+  get noAvailableAccounts() {
+    return !this.hasAvailableAccounts;
+  },
   openAccountSyncTab() {
     this.activeSettingsTab = 'account';
   },
@@ -184,11 +220,9 @@ Alpine.data('accountOptions', () => ({
       const selectedAccounts = [...this.selectedAccounts];
 
       this.selectedAccounts = selectedAccounts;
-      await chrome.storage.local.set({
+      await saveExtensionSettings({
         selectedAccounts,
       });
-      const stored = await chrome.storage.local.get(['selectedAccounts']);
-      this.selectedAccounts = stored.selectedAccounts ?? [];
     } catch { /* empty */ }
   },
   onApiInput(event: Event) {
