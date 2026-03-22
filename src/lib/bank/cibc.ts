@@ -113,27 +113,7 @@ const cibcExtractTransactions: InjectedPageFn<[], Transaction[]> = () => {
       };
     });
 
-  const initialTransactions = readTransactions();
-  if (initialTransactions.length > 0) {
-    return Promise.resolve(initialTransactions);
-  }
-
-  return new Promise<Transaction[]>((resolve) => {
-    const startedAt = Date.now();
-    const intervalId = window.setInterval(() => {
-      const transactions = readTransactions();
-      if (transactions.length > 0) {
-        window.clearInterval(intervalId);
-        resolve(transactions);
-        return;
-      }
-
-      if (Date.now() - startedAt >= 4000) {
-        window.clearInterval(intervalId);
-        resolve([]);
-      }
-    }, 200);
-  });
+  return readTransactions();
 };
 
 export const CIBC_BANK_ADAPTER: BankAdapter = {
