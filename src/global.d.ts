@@ -14,21 +14,27 @@ interface Window {
 }
 
 type Account = {
+  key?: string;
   name: string;
   balance: string;
 };
+type TransactionAccountType = 'credit_card' | 'checking' | 'savings' | 'unknown';
+type TransactionType = 'credit' | 'debit';
 type Transaction = {
   key: string;
   date: string;
   amountText: string;
   amountValue: number;
+  rawAmountValue: number;
+  currencyCode: string | null;
   cardProductName: string;
   merchant: string;
   description: string;
   maskedCardNumber: string;
   cardLastFour: string;
   accountName: string;
-  direction: 'credit' | 'debit' | 'unknown';
+  accountType: TransactionAccountType;
+  type: TransactionType;
   category: string;
 };
 
@@ -61,6 +67,7 @@ type TransactionsFieldMapping = {
   amountProperty: string;
   merchantProperty: string;
   accountNameProperty: string;
+  typeProperty: string;
 };
 type ExtensionSettings = {
   availableAccounts: Record<string, string>;

@@ -61,7 +61,7 @@
             <div class="mb-5">
               <h2 class="text-2xl font-semibold">Account Sync</h2>
               <p class="mt-1 max-w-3xl text-stone-500 dark:text-stone-300">
-                Configure the balance database and choose which account groups should appear in the existing balance sync flow.
+                Configure the balance database and choose which detected accounts should appear in the balance sync flow.
               </p>
             </div>
 
@@ -166,10 +166,10 @@
               <section class="rounded-3xl border border-stone-200 bg-stone-50 p-5">
                 <div class="mb-4">
                   <h3 class="text-xl font-semibold dark:text-stone-500">Select Accounts</h3>
-                  <p class="mt-1 text-stone-500">Choose which account groups should appear in balance sync.</p>
+                  <p class="mt-1 text-stone-500">Choose which detected accounts should appear in balance sync. This stays in sync with the Popup.</p>
                 </div>
 
-                <ul class="overflow-hidden rounded-2xl border border-stone-200 bg-white text-sm">
+                <ul x-show="hasAvailableAccounts" class="overflow-hidden rounded-2xl border border-stone-200 bg-white text-sm">
                   <template x-for="(account, index) in availableAccounts" :key="account.className">
                     <li class="flex w-full border-b border-stone-200 px-4 last:border-b-0">
                       <div class="flex items-center py-3">
@@ -187,6 +187,10 @@
                     </li>
                   </template>
                 </ul>
+
+                <p x-show="noAvailableAccounts" class="rounded-2xl border border-dashed border-stone-300 bg-white px-4 py-3 text-sm text-stone-500">
+                  Open a supported bank balances page in the Popup first to detect accounts here.
+                </p>
               </section>
             </div>
             </div>
@@ -204,7 +208,7 @@
             <section class="rounded-3xl border border-stone-200 bg-stone-50 p-5">
               <div class="mb-4">
                 <h3 class="text-xl font-semibold dark:text-stone-500">Transactions Database</h3>
-                <p class="mt-1 text-stone-500">This database is separate from balance sync and stores credit card transaction rows.</p>
+                <p class="mt-1 text-stone-500">This database is separate from balance sync and stores normalized transaction rows.</p>
               </div>
 
               <label for="transactions-link" class="mb-2 block text-sm font-medium text-stone-700">Transactions Database Block Link</label>
@@ -344,6 +348,19 @@
                           >
                             <option value="">Select a rich_text field</option>
                             <template x-for="property in transactionsAccountNameOptions" :key="property.id">
+                              <option :value="property.name" :selected="property.selected" x-text="property.name"></option>
+                            </template>
+                          </select>
+                        </label>
+
+                        <label class="text-sm text-stone-700">
+                          <span class="mb-1 block font-medium">Type Field</span>
+                          <select
+                            @change="onTransactionsTypeChange"
+                            class="w-full rounded-xl border border-stone-300 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-lime-700 focus:ring-2 focus:ring-lime-700/20"
+                          >
+                            <option value="">Select a select field</option>
+                            <template x-for="property in transactionsTypeOptions" :key="property.id">
                               <option :value="property.name" :selected="property.selected" x-text="property.name"></option>
                             </template>
                           </select>

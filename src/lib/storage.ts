@@ -25,6 +25,45 @@ const badgeClassForType = (type: string): string => {
   }
 };
 
+const normalizeAvailableAccounts = (availableAccounts: unknown): Record<string, string> => {
+  if (!availableAccounts || typeof availableAccounts !== 'object' || Array.isArray(availableAccounts)) {
+    return {};
+  }
+
+  return Object.entries(availableAccounts).reduce<Record<string, string>>((result, [key, value]) => {
+    if (typeof key !== 'string' || typeof value !== 'string') {
+      return result;
+    }
+
+    result[key] = value;
+    return result;
+  }, {});
+};
+
+const normalizeSelectedAccounts = (selectedAccounts: unknown): string[] => {
+  if (!Array.isArray(selectedAccounts)) {
+    return [];
+  }
+
+  return Array.from(new Set(selectedAccounts.filter((value): value is string => typeof value === 'string')));
+};
+
+const normalizeTransactionsFieldMapping = (mapping: unknown): TransactionsFieldMapping | null => {
+  if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) {
+    return null;
+  }
+
+  const candidate = mapping as Partial<TransactionsFieldMapping>;
+
+  return {
+    dateProperty: typeof candidate.dateProperty === 'string' ? candidate.dateProperty : '',
+    amountProperty: typeof candidate.amountProperty === 'string' ? candidate.amountProperty : '',
+    merchantProperty: typeof candidate.merchantProperty === 'string' ? candidate.merchantProperty : '',
+    accountNameProperty: typeof candidate.accountNameProperty === 'string' ? candidate.accountNameProperty : '',
+    typeProperty: typeof candidate.typeProperty === 'string' ? candidate.typeProperty : '',
+  };
+};
+
 const normalizeDatabaseProperties = (properties: unknown): DatabaseProperty[] => {
   if (Array.isArray(properties)) {
     return properties
@@ -89,6 +128,8 @@ export const getExtensionSettings = async (): Promise<ExtensionSettings> => {
   const stored = (await chrome.storage.local.get([...STORAGE_KEYS])) as RawSettings;
   const legacyDatabase = stored.selectedDatabase ?? null;
   const balanceDatabase = normalizeDatabase(stored.balanceDatabase ?? legacyDatabase);
+  const availableAccounts = normalizeAvailableAccounts(stored.availableAccounts);
+  const selectedAccounts = normalizeSelectedAccounts(stored.selectedAccounts);
 
   if (legacyDatabase && !stored.balanceDatabase) {
     await chrome.storage.local.set({
@@ -98,12 +139,12 @@ export const getExtensionSettings = async (): Promise<ExtensionSettings> => {
   }
 
   return {
-    availableAccounts: stored.availableAccounts ?? EMPTY_SETTINGS.availableAccounts,
-    selectedAccounts: stored.selectedAccounts ?? EMPTY_SETTINGS.selectedAccounts,
+    availableAccounts,
+    selectedAccounts,
     notionApiKey: stored.notionApiKey ?? EMPTY_SETTINGS.notionApiKey,
     balanceDatabase,
     transactionsDatabase: normalizeDatabase(stored.transactionsDatabase ?? EMPTY_SETTINGS.transactionsDatabase),
-    transactionsFieldMapping: stored.transactionsFieldMapping ?? EMPTY_SETTINGS.transactionsFieldMapping,
+    transactionsFieldMapping: normalizeTransactionsFieldMapping(stored.transactionsFieldMapping) ?? EMPTY_SETTINGS.transactionsFieldMapping,
     balanceDatabaseLinkDraft: stored.balanceDatabaseLinkDraft ?? balanceDatabase?.link ?? EMPTY_SETTINGS.balanceDatabaseLinkDraft,
     transactionsDatabaseLinkDraft:
       stored.transactionsDatabaseLinkDraft ??

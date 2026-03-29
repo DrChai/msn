@@ -59,6 +59,21 @@ const cibcExtractTransactions: InjectedPageFn<[], Transaction[]> = () => {
     const parsed = parseFloat(normalized.replace(/[^0-9.-]+/g, ''));
     return Number.isNaN(parsed) ? 0 : parsed;
   };
+  const getCurrencyCode = (value: string): string | null => {
+    const currencyMatch = value.match(/\b([A-Z]{3})\b/);
+    return currencyMatch?.[1] ?? null;
+  };
+  const inferTransactionType = (amountClassList: string[], rawAmountValue: number): TransactionType => {
+    if (amountClassList.includes('credit')) {
+      return 'credit';
+    }
+
+    if (amountClassList.includes('debit')) {
+      return 'debit';
+    }
+
+    return rawAmountValue < 0 ? 'debit' : 'credit';
+  };
 
   const parseTransactionDate = (value: string): string => {
     const parsed = new Date(value);
@@ -91,8 +106,8 @@ const cibcExtractTransactions: InjectedPageFn<[], Transaction[]> = () => {
       const categoryIcon = row.querySelector('td.transactions img[title]') as HTMLImageElement | null;
       const category = categoryIcon?.title?.trim() ?? '';
       const cardLastFour = (maskedCardNumber.match(/(\d{4})$/) ?? [])[1] ?? '';
-      const amountValue = parseSignedAmount(amountText);
-      const direction = amountClassList.includes('credit') ? 'credit' : amountClassList.includes('debit') ? 'debit' : 'unknown';
+      const rawAmountValue = parseSignedAmount(amountText);
+      const type = inferTransactionType(amountClassList, rawAmountValue);
       const accountName =
         cardProductName && cardLastFour ? `${cardProductName} ${cardLastFour}` : cardLastFour ? `Card ${cardLastFour}` : cardProductName || 'Card';
 
@@ -100,39 +115,22 @@ const cibcExtractTransactions: InjectedPageFn<[], Transaction[]> = () => {
         key: `${dateText}-${amountText}-${description}-${maskedCardNumber}`,
         date: parseTransactionDate(dateText),
         amountText,
-        amountValue: Number.isNaN(amountValue) ? 0 : amountValue,
+        amountValue: Math.abs(Number.isNaN(rawAmountValue) ? 0 : rawAmountValue),
+        rawAmountValue: Number.isNaN(rawAmountValue) ? 0 : rawAmountValue,
+        currencyCode: getCurrencyCode(amountText),
         cardProductName,
         merchant: description,
         description,
         maskedCardNumber,
         cardLastFour,
         accountName,
-        direction,
+        accountType: 'credit_card',
+        type,
         category,
       };
     });
 
-  const initialTransactions = readTransactions();
-  if (initialTransactions.length > 0) {
-    return Promise.resolve(initialTransactions);
-  }
-
-  return new Promise<Transaction[]>((resolve) => {
-    const startedAt = Date.now();
-    const intervalId = window.setInterval(() => {
-      const transactions = readTransactions();
-      if (transactions.length > 0) {
-        window.clearInterval(intervalId);
-        resolve(transactions);
-        return;
-      }
-
-      if (Date.now() - startedAt >= 4000) {
-        window.clearInterval(intervalId);
-        resolve([]);
-      }
-    }, 200);
-  });
+  return readTransactions();
 };
 
 export const CIBC_BANK_ADAPTER: BankAdapter = {

@@ -68,7 +68,7 @@ type DatabaseConnectionResult = {
 };
 
 const BALANCE_REQUIRED_FIELDS = ['Account Name', 'Balance', 'Date'] as const;
-const TRANSACTION_REQUIRED_FIELDS = ['Date', 'Amount', 'Merchant/Description', 'Account Name'] as const;
+const TRANSACTION_REQUIRED_FIELDS = ['Date', 'Amount', 'Merchant/Description', 'Account Name', 'Type'] as const;
 export const TRANSACTION_SYNC_ID_PROPERTY = 'Sync ID';
 
 const BALANCE_AUTO_PROPERTIES = {
@@ -76,10 +76,20 @@ const BALANCE_AUTO_PROPERTIES = {
   Date: { date: {} },
 } as const;
 
+const TRANSACTION_TYPE_SELECT_PROPERTY: NotionDataSourceUpdateProperties[string] = {
+  select: {
+    options: [
+      { name: 'debit', color: 'red' },
+      { name: 'credit', color: 'green' },
+    ],
+  },
+};
+
 const TRANSACTION_AUTO_PROPERTIES = {
   Amount: { number: { format: 'dollar' } },
   Date: { date: {} },
   'Account Name': { rich_text: {} },
+  Type: TRANSACTION_TYPE_SELECT_PROPERTY,
   [TRANSACTION_SYNC_ID_PROPERTY]: { rich_text: {} },
 } as const;
 
@@ -201,8 +211,12 @@ const missingTransactionsFields = (database: Database): string[] => {
   const missing: string[] = [];
   const titleProperties = database.properties.filter((property) => property.type === 'title');
   const richTextProperties = database.properties.filter((property) => property.type === 'rich_text');
+  const hasMerchantProperty = titleProperties.length > 0 || richTextProperties.length > 0;
+  const hasAccountNameProperty =
+    Boolean(findPropertyByName(database, 'Account Name')) || richTextProperties.length >= (titleProperties.length > 0 ? 1 : 2);
+  const hasTypeProperty = Boolean(findPropertyByName(database, 'Type')) || database.properties.some((property) => property.type === 'select');
 
-  if (titleProperties.length === 0 && richTextProperties.length === 0) {
+  if (!hasMerchantProperty) {
     missing.push('Merchant/Description');
   }
   if (!database.properties.some((property) => property.type === 'number')) {
@@ -211,11 +225,11 @@ const missingTransactionsFields = (database: Database): string[] => {
   if (!database.properties.some((property) => property.type === 'date')) {
     missing.push('Date');
   }
-  if (richTextProperties.length === 0 && titleProperties.length > 0) {
+  if (!hasAccountNameProperty) {
     missing.push('Account Name');
   }
-  if (titleProperties.length === 0 && richTextProperties.length < 2) {
-    missing.push('Account Name');
+  if (!hasTypeProperty) {
+    missing.push('Type');
   }
 
   return missing;
@@ -243,21 +257,14 @@ const findPropertyByName = (database: Database, name: string): DatabaseProperty 
 const findPropertyByType = (database: Database, type: string): DatabaseProperty | undefined =>
   getDatabaseProperty(database, (property) => property.type === type);
 
-const buildDefaultTransactionsFieldMapping = (database: Database): TransactionsFieldMapping | null => {
-  const titleProperty = database.properties.find((property) => property.type === 'title');
-  const richTextProperties = database.properties.filter((property) => property.type === 'rich_text');
-  const amountProperty = findPropertyByName(database, 'Amount') ?? findPropertyByType(database, 'number');
-  const dateProperty = findPropertyByName(database, 'Date') ?? findPropertyByType(database, 'date');
-  const merchantProperty =
-    titleProperty ??
-    findPropertyByName(database, 'Merchant') ??
-    findPropertyByName(database, 'Description') ??
-    richTextProperties[0];
-  const accountNameProperty =
-    findPropertyByName(database, 'Account Name') ??
-    richTextProperties.find((property) => property.name !== merchantProperty?.name);
+export const suggestTransactionsFieldMapping = (database: Database): TransactionsFieldMapping | null => {
+  const amountProperty = findPropertyByName(database, 'Amount');
+  const dateProperty = findPropertyByName(database, 'Date');
+  const merchantProperty = findPropertyByName(database, 'Merchant/Description');
+  const accountNameProperty = findPropertyByName(database, 'Account Name');
+  const typeProperty = findPropertyByName(database, 'Type');
 
-  if (!dateProperty || !amountProperty || !merchantProperty || !accountNameProperty) {
+  if (!dateProperty || !amountProperty || !merchantProperty || !accountNameProperty || !typeProperty) {
     return null;
   }
 
@@ -266,9 +273,10 @@ const buildDefaultTransactionsFieldMapping = (database: Database): TransactionsF
     amountProperty.name,
     merchantProperty.name,
     accountNameProperty.name,
+    typeProperty.name,
   ]);
 
-  if (uniqueProperties.size !== 4) {
+  if (uniqueProperties.size !== 5) {
     return null;
   }
 
@@ -277,6 +285,7 @@ const buildDefaultTransactionsFieldMapping = (database: Database): TransactionsF
     amountProperty: amountProperty.name,
     merchantProperty: merchantProperty.name,
     accountNameProperty: accountNameProperty.name,
+    typeProperty: typeProperty.name,
   };
 };
 
@@ -406,6 +415,14 @@ const ensureTransactionsSchema = async (
     propertiesToCreate['Account Name'] = TRANSACTION_AUTO_PROPERTIES['Account Name'];
     autoCreatedFields.push('Account Name');
   }
+  const typeProperty = findPropertyByName(mapped, 'Type');
+  if (!typeProperty) {
+    propertiesToCreate.Type = TRANSACTION_AUTO_PROPERTIES.Type;
+    autoCreatedFields.push('Type');
+  } else if (typeProperty.type === 'rich_text') {
+    propertiesToCreate.Type = TRANSACTION_AUTO_PROPERTIES.Type;
+    autoCreatedFields.push('Type (converted to select)');
+  }
   if (!findPropertyByName(mapped, TRANSACTION_SYNC_ID_PROPERTY)) {
     propertiesToCreate[TRANSACTION_SYNC_ID_PROPERTY] = TRANSACTION_AUTO_PROPERTIES[TRANSACTION_SYNC_ID_PROPERTY];
     autoCreatedFields.push(TRANSACTION_SYNC_ID_PROPERTY);
@@ -493,7 +510,7 @@ export const connectNotionDatabase = async (
 
   return {
     database,
-    suggestedMapping: kind === 'transactions' ? buildDefaultTransactionsFieldMapping(database) : null,
+    suggestedMapping: kind === 'transactions' ? suggestTransactionsFieldMapping(database) : null,
   };
 };
 
@@ -534,13 +551,21 @@ export const validateTransactionsFieldMapping = (
     ['amountProperty', ['number']],
     ['merchantProperty', ['title', 'rich_text']],
     ['accountNameProperty', ['rich_text']],
+    ['typeProperty', ['select']],
   ];
+  const fieldLabels: Record<keyof TransactionsFieldMapping, string> = {
+    dateProperty: 'Date field',
+    amountProperty: 'Amount field',
+    merchantProperty: 'Merchant/Description field',
+    accountNameProperty: 'Account Name field',
+    typeProperty: 'Type field',
+  };
   const errors: string[] = [];
 
   for (const [field, allowedTypes] of rules) {
     const propertyName = mapping[field];
     if (!propertyName) {
-      errors.push(`${field} is required.`);
+      errors.push(`${fieldLabels[field]} is required.`);
       continue;
     }
 

@@ -2,8 +2,15 @@ import Alpine from '@alpinejs/csp';
 import { Client } from '@notionhq/client';
 
 import '../global.css';
-import { detectBankFromHost } from '../lib/bank';
-import { createNotionClient, refreshNotionDatabaseConnection, TRANSACTION_SYNC_ID_PROPERTY, validateTransactionsFieldMapping } from '../lib/notion';
+import { detectBankFromHost, getBankAdapterById } from '../lib/bank';
+import type { BankId } from '../lib/bank/type';
+import {
+  createNotionClient,
+  refreshNotionDatabaseConnection,
+  suggestTransactionsFieldMapping,
+  TRANSACTION_SYNC_ID_PROPERTY,
+  validateTransactionsFieldMapping,
+} from '../lib/notion';
 import { getExtensionSettings, saveExtensionSettings } from '../lib/storage';
 
 window.Alpine = Alpine;
@@ -43,11 +50,45 @@ const createTransactionSyncId = async (transaction: Transaction): Promise<string
   const seed = [
     normalizeSyncIdPart(transaction.merchant),
     transaction.date,
-    transaction.amountValue.toFixed(2),
+    transaction.rawAmountValue.toFixed(2),
     normalizeSyncIdPart(transaction.accountName),
   ].join('|');
 
   return sha256Hex(seed);
+};
+const getTransactionAccountTypeLabel = (accountType: TransactionAccountType): string => {
+  switch (accountType) {
+    case 'credit_card':
+      return 'Credit card';
+    case 'checking':
+      return 'Checking';
+    case 'savings':
+      return 'Savings';
+    default:
+      return 'Unknown';
+  }
+};
+const getTransactionCurrencyCode = (transaction: Transaction): string | null => {
+  if (transaction.currencyCode) {
+    return transaction.currencyCode;
+  }
+
+  const currencyMatch = transaction.amountText.match(/\b([A-Z]{3})\b/);
+  return currencyMatch?.[1] ?? null;
+};
+const getTransactionTypeLabel = (type: TransactionType): string => (type === 'debit' ? 'Debit' : 'Credit');
+const formatTransactionAmount = (transaction: Transaction): string => {
+  const amount = Math.abs(transaction.amountValue);
+  const currencyCode = getTransactionCurrencyCode(transaction);
+  const formatter = new Intl.NumberFormat(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  const absAmount = formatter.format(amount);
+  const currencyPrefix = currencyCode === 'USD' ? 'US$' : '$';
+  const currencySuffix = currencyCode ? ` ${currencyCode}` : '';
+
+  return `${currencyPrefix}${absAmount}${currencySuffix}`;
 };
 type NotionTextFragment = {
   plain_text?: string;
@@ -65,6 +106,41 @@ type NotionQueryPage = {
 
 type NotionPageCreateRequest = Parameters<Client['pages']['create']>[0];
 type NotionPageCreateProperties = NonNullable<NotionPageCreateRequest['properties']>;
+type BankAccountKey = string;
+type BalanceAccountsUpdateDetail = {
+  bankId: BankId;
+  accounts: Account[];
+  selectedAccountKeys: string[];
+};
+const BANK_ACCOUNT_KEY_SEPARATOR = '::';
+const toBankScopedAccountKey = (bankId: BankId, accountKey: string): BankAccountKey => `${bankId}${BANK_ACCOUNT_KEY_SEPARATOR}${accountKey}`;
+const isBankScopedAccountKey = (value: string, bankId: BankId): boolean => value.startsWith(`${bankId}${BANK_ACCOUNT_KEY_SEPARATOR}`);
+const fromBankScopedAccountKey = (value: string, bankId: BankId): string =>
+  isBankScopedAccountKey(value, bankId) ? value.slice(`${bankId}${BANK_ACCOUNT_KEY_SEPARATOR}`.length) : value;
+
+const getAccountSelectionKey = (account: Account): string => account.key?.trim() || account.name;
+const getScopedAvailableAccountsForBank = (availableAccounts: Record<string, string>, bankId: BankId): Record<string, string> =>
+  Object.fromEntries(Object.entries(availableAccounts).filter(([key]) => isBankScopedAccountKey(key, bankId)));
+const getScopedSelectedAccountsForBank = (selectedAccounts: string[], bankId: BankId): string[] =>
+  selectedAccounts.filter((key) => isBankScopedAccountKey(key, bankId)).map((key) => fromBankScopedAccountKey(key, bankId));
+const buildAvailableAccountsMap = (accounts: Account[], bankId: BankId, bankLabel: string): Record<string, string> => {
+  const nameCounts = accounts.reduce<Record<string, number>>((result, account) => {
+    result[account.name] = (result[account.name] ?? 0) + 1;
+    return result;
+  }, {});
+
+  return Object.fromEntries(
+    accounts.map((account) => {
+      const isDuplicateName = (nameCounts[account.name] ?? 0) > 1;
+      const baseTitle = isDuplicateName ? `${account.name} (${account.balance})` : account.name;
+      return [toBankScopedAccountKey(bankId, getAccountSelectionKey(account)), `${bankLabel} • ${baseTitle}`];
+    }),
+  );
+};
+const matchesStoredAccountSelection = (account: Account, selectedAccounts: string[], bankId: BankId): boolean =>
+  selectedAccounts.includes(toBankScopedAccountKey(bankId, getAccountSelectionKey(account))) ||
+  selectedAccounts.includes(getAccountSelectionKey(account)) ||
+  selectedAccounts.includes(account.name);
 
 const getTransactionsDateRange = (transactions: Transaction[]): { start: string; end: string } | null => {
   const dates = transactions
@@ -134,8 +210,25 @@ const getExistingTransactionSyncIds = async (
   return syncIds;
 };
 
+const resolveTransactionsFieldMapping = (
+  mapping: TransactionsFieldMapping | null,
+  database: Database | null,
+): TransactionsFieldMapping | null => {
+  if (!database) {
+    return mapping;
+  }
+
+  if (mapping && validateTransactionsFieldMapping(mapping, database).length === 0) {
+    return mapping;
+  }
+
+  return suggestTransactionsFieldMapping(database);
+};
+
 Alpine.data('popup', () => ({
   filteredAccts: [] as Account[],
+  selectedAccounts: [] as string[],
+  currentBankId: null as BankId | null,
   detectedTransactions: [] as Transaction[],
   isLoading: false,
   error: '',
@@ -152,7 +245,44 @@ Alpine.data('popup', () => ({
     this.notionApiKey = settings.notionApiKey;
     this.balanceDatabase = settings.balanceDatabase;
     this.transactionsDatabase = settings.transactionsDatabase;
-    this.transactionsFieldMapping = settings.transactionsFieldMapping;
+    this.transactionsFieldMapping = resolveTransactionsFieldMapping(settings.transactionsFieldMapping, settings.transactionsDatabase);
+    this.selectedAccounts = [];
+
+    if (this.transactionsFieldMapping !== settings.transactionsFieldMapping) {
+      saveExtensionSettings({
+        transactionsFieldMapping: this.transactionsFieldMapping,
+      }).catch(() => {});
+    }
+
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local') {
+        return;
+      }
+
+      if (
+        !changes.selectedAccounts &&
+        !changes.availableAccounts &&
+        !changes.balanceDatabase &&
+        !changes.transactionsDatabase &&
+        !changes.transactionsFieldMapping &&
+        !changes.notionApiKey
+      ) {
+        return;
+      }
+
+      getExtensionSettings()
+        .then((updatedSettings) => {
+          this.selectedAccounts = this.currentBankId ? getScopedSelectedAccountsForBank(updatedSettings.selectedAccounts, this.currentBankId) : [];
+          this.notionApiKey = updatedSettings.notionApiKey;
+          this.balanceDatabase = updatedSettings.balanceDatabase;
+          this.transactionsDatabase = updatedSettings.transactionsDatabase;
+          this.transactionsFieldMapping = resolveTransactionsFieldMapping(
+            updatedSettings.transactionsFieldMapping,
+            updatedSettings.transactionsDatabase,
+          );
+        })
+        .catch(() => {});
+    });
   },
   get syncBtnText() {
     if (this.isLoading) {
@@ -178,7 +308,7 @@ Alpine.data('popup', () => ({
       return 'Not connected';
     }
 
-    const mappingErrors = validateTransactionsFieldMapping(this.transactionsFieldMapping, this.transactionsDatabase);
+    const mappingErrors = validateTransactionsFieldMapping(this.resolvedTransactionsFieldMapping, this.transactionsDatabase);
     if (mappingErrors.length > 0) {
       return 'Mapping incomplete';
     }
@@ -186,14 +316,20 @@ Alpine.data('popup', () => ({
     return this.transactionsDatabase.schemaStatus?.isValid ? 'Ready' : 'Needs attention';
   },
   get canSyncBalanceState() {
-    return Boolean(this.balanceDatabase && this.notionApiKey && this.balanceDatabase.schemaStatus?.isValid && !this.isLoading && this.filteredAccts.length > 0);
+    return Boolean(
+      this.balanceDatabase &&
+        this.notionApiKey &&
+        this.balanceDatabase.schemaStatus?.isValid &&
+        !this.isLoading &&
+        this.selectedBalanceAccounts.length > 0,
+    );
   },
   get canSyncTransactionsState() {
     if (!this.transactionsDatabase || !this.notionApiKey || !this.transactionsDatabase.schemaStatus?.isValid || this.isLoading) {
       return false;
     }
 
-    const mappingErrors = validateTransactionsFieldMapping(this.transactionsFieldMapping, this.transactionsDatabase);
+    const mappingErrors = validateTransactionsFieldMapping(this.resolvedTransactionsFieldMapping, this.transactionsDatabase);
     return mappingErrors.length === 0 && this.detectedTransactions.length > 0;
   },
   get syncDisabled() {
@@ -208,17 +344,53 @@ Alpine.data('popup', () => ({
   get balanceDatabaseTitle() {
     return this.balanceDatabase ? this.balanceDatabase.title : 'Not connected';
   },
+  get balanceAccountOptions() {
+    return this.filteredAccts.map((account: Account) => ({
+      ...account,
+      key: getAccountSelectionKey(account),
+      isSelected: this.selectedAccounts.includes(getAccountSelectionKey(account)),
+    }));
+  },
+  get selectedBalanceAccounts() {
+    const selectedAccountSet = new Set(this.selectedAccounts);
+    return this.filteredAccts.filter((account: Account) => selectedAccountSet.has(getAccountSelectionKey(account)));
+  },
+  get selectedBalanceCountText() {
+    return `${this.selectedBalanceAccounts.length} of ${this.filteredAccts.length} account${this.filteredAccts.length === 1 ? '' : 's'} selected`;
+  },
   get transactionsDatabaseTitle() {
     return this.transactionsDatabase ? this.transactionsDatabase.title : 'Not connected';
+  },
+  get resolvedTransactionsFieldMapping() {
+    return resolveTransactionsFieldMapping(this.transactionsFieldMapping, this.transactionsDatabase);
   },
   get hasTransactionsPreview() {
     return this.detectedTransactions.length > 0;
   },
   get transactionsPreview() {
-    return this.detectedTransactions.slice(0, 3);
+    return this.detectedTransactions.map((transaction: Transaction) => ({
+      ...transaction,
+      previewAmountText: formatTransactionAmount(transaction),
+      previewTypeText: getTransactionTypeLabel(transaction.type),
+      accountTypeLabel: getTransactionAccountTypeLabel(transaction.accountType),
+    }));
   },
   get transactionsPreviewCountText() {
     return `${this.detectedTransactions.length} transaction${this.detectedTransactions.length === 1 ? '' : 's'} detected`;
+  },
+  get detectedTransactionsAccountTypeText() {
+    if (this.detectedTransactions.length === 0) {
+      return 'Unknown';
+    }
+
+    const uniqueAccountTypes = Array.from(
+      new Set<TransactionAccountType>(this.detectedTransactions.map((transaction: Transaction) => transaction.accountType)),
+    );
+    if (uniqueAccountTypes.length === 1) {
+      return getTransactionAccountTypeLabel(uniqueAccountTypes[0] ?? 'unknown');
+    }
+
+    return uniqueAccountTypes.map((accountType: TransactionAccountType) => getTransactionAccountTypeLabel(accountType)).join(', ');
   },
   get showingBalances() {
     return this.pageMode === 'balances';
@@ -261,11 +433,13 @@ Alpine.data('popup', () => ({
     this.error = '';
     this.syncResultMessage = '';
   },
-  afterAccountsUpdate(event: CustomEvent<Account[]>) {
+  afterAccountsUpdate(event: CustomEvent<BalanceAccountsUpdateDetail>) {
     this.isLoading = false;
     this.pageMode = 'balances';
     if (event.detail) {
-      this.filteredAccts = event.detail;
+      this.currentBankId = event.detail.bankId;
+      this.filteredAccts = event.detail.accounts;
+      this.selectedAccounts = event.detail.selectedAccountKeys;
       this.detectedTransactions = [];
     }
   },
@@ -282,6 +456,38 @@ Alpine.data('popup', () => ({
     this.error = '';
     this.syncResultMessage = '';
     chrome.runtime.openOptionsPage();
+  },
+  async onBalanceSelectionChange() {
+    if (!this.currentBankId) {
+      return;
+    }
+
+    const selectedAccounts = this.filteredAccts
+      .map((account: Account) => getAccountSelectionKey(account))
+      .filter((accountKey: string) => this.selectedAccounts.includes(accountKey));
+
+    const settings = await getExtensionSettings();
+    const currentBankScopedAccountKeys = this.filteredAccts.map((account: Account) => toBankScopedAccountKey(this.currentBankId!, getAccountSelectionKey(account)));
+    const mergedAvailableAccounts = Object.fromEntries(
+      Object.entries(settings.availableAccounts).filter(
+        ([key]) => !currentBankScopedAccountKeys.includes(key) && !this.filteredAccts.some((account: Account) => getAccountSelectionKey(account) === key),
+      ),
+    );
+    const mergedSelectedAccounts = settings.selectedAccounts.filter(
+      (key: string) =>
+        !currentBankScopedAccountKeys.includes(key) &&
+        !this.filteredAccts.some((account: Account) => getAccountSelectionKey(account) === key || account.name === key),
+    );
+    const currentBankLabel = getBankAdapterById(this.currentBankId)?.name ?? this.currentBankId.toUpperCase();
+
+    this.selectedAccounts = selectedAccounts;
+    await saveExtensionSettings({
+      availableAccounts: {
+        ...mergedAvailableAccounts,
+        ...buildAvailableAccountsMap(this.filteredAccts, this.currentBankId, currentBankLabel),
+      },
+      selectedAccounts: [...mergedSelectedAccounts, ...selectedAccounts.map((accountKey: string) => toBankScopedAccountKey(this.currentBankId!, accountKey))],
+    });
   },
   async onSync() {
     if (this.showingTransactions) {
@@ -329,7 +535,7 @@ Alpine.data('popup', () => ({
       }
 
       await Promise.all(
-        this.filteredAccts.map((acct: Account) =>
+        this.selectedBalanceAccounts.map((acct: Account) =>
           notion.pages.create({
             parent: {
               data_source_id: balanceDatabase.dataSourceId!,
@@ -361,7 +567,7 @@ Alpine.data('popup', () => ({
         ),
       );
       this.syncBtnTitle = 'Synced';
-      this.syncResultMessage = `Created ${this.filteredAccts.length} balance item${this.filteredAccts.length === 1 ? '' : 's'}.`;
+      this.syncResultMessage = `Created ${this.selectedBalanceAccounts.length} balance item${this.selectedBalanceAccounts.length === 1 ? '' : 's'}.`;
       window.dispatchEvent(new CustomEvent('after-accounts-update', {}));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -380,8 +586,9 @@ Alpine.data('popup', () => ({
       return;
     }
 
-    const mappingErrors = validateTransactionsFieldMapping(this.transactionsFieldMapping, this.transactionsDatabase);
-    if (mappingErrors.length > 0 || !this.transactionsFieldMapping) {
+    const initialMapping = this.resolvedTransactionsFieldMapping;
+    const mappingErrors = validateTransactionsFieldMapping(initialMapping, this.transactionsDatabase);
+    if (mappingErrors.length > 0 || !initialMapping) {
       this.error = mappingErrors[0] ?? 'Transactions field mapping is incomplete.';
       return;
     }
@@ -407,25 +614,31 @@ Alpine.data('popup', () => ({
     try {
       const transactionsDatabase = await refreshNotionDatabaseConnection(notion, this.transactionsDatabase, 'transactions');
       this.transactionsDatabase = transactionsDatabase;
+      this.transactionsFieldMapping = resolveTransactionsFieldMapping(this.transactionsFieldMapping, transactionsDatabase);
       await saveExtensionSettings({
         transactionsDatabase,
+        transactionsFieldMapping: this.transactionsFieldMapping,
       });
 
-      const refreshedMappingErrors = validateTransactionsFieldMapping(this.transactionsFieldMapping, transactionsDatabase);
+      const resolvedMapping = this.resolvedTransactionsFieldMapping;
+      const refreshedMappingErrors = validateTransactionsFieldMapping(resolvedMapping, transactionsDatabase);
       if (refreshedMappingErrors.length > 0) {
         this.error = refreshedMappingErrors[0];
         return;
       }
 
       const merchantProperty = transactionsDatabase.properties.find(
-        (property) => property.name === this.transactionsFieldMapping!.merchantProperty,
+        (property) => property.name === resolvedMapping!.merchantProperty,
+      );
+      const typeProperty = transactionsDatabase.properties.find(
+        (property) => property.name === resolvedMapping!.typeProperty,
       );
       const syncIdProperty = transactionsDatabase.properties.find(
         (property) => property.name === TRANSACTION_SYNC_ID_PROPERTY,
       );
 
-      if (!merchantProperty || !syncIdProperty) {
-        this.error = 'Transactions database is missing either the merchant field or the Sync ID field.';
+      if (!merchantProperty || !typeProperty || !syncIdProperty) {
+        this.error = 'Transactions database is missing the merchant field, type field, or Sync ID field.';
         return;
       }
 
@@ -445,7 +658,7 @@ Alpine.data('popup', () => ({
       const existingSyncIds = await getExistingTransactionSyncIds(
         notion,
         transactionsDatabase.dataSourceId!,
-        this.transactionsFieldMapping.dateProperty,
+        resolvedMapping!.dateProperty,
         transactionDateRange,
       );
 
@@ -469,22 +682,31 @@ Alpine.data('popup', () => ({
       await Promise.all(
         unsyncedTransactions.map(({ transaction, syncId }) => {
           const properties: NotionPageCreateProperties = {
-            [this.transactionsFieldMapping!.dateProperty]: {
+            [resolvedMapping!.dateProperty]: {
               type: 'date',
               date: {
                 start: transaction.date,
               },
             },
-            [this.transactionsFieldMapping!.amountProperty]: {
+            [resolvedMapping!.amountProperty]: {
               type: 'number',
-              number: transaction.amountValue,
+              number: Math.abs(transaction.amountValue),
             },
-            [this.transactionsFieldMapping!.accountNameProperty]: toRichText(transaction.accountName),
+            [resolvedMapping!.accountNameProperty]: toRichText(transaction.accountName),
             [TRANSACTION_SYNC_ID_PROPERTY]: toRichText(syncId),
           };
 
-          properties[this.transactionsFieldMapping!.merchantProperty] =
+          properties[resolvedMapping!.merchantProperty] =
             merchantProperty.type === 'title' ? toTitle(transaction.merchant) : toRichText(transaction.merchant);
+          properties[resolvedMapping!.typeProperty] =
+            typeProperty.type === 'select'
+              ? {
+                  type: 'select',
+                  select: {
+                    name: transaction.type,
+                  },
+                }
+              : toRichText(transaction.type);
 
           return notion.pages.create({
             parent: {
@@ -608,15 +830,17 @@ const scanCurrentPage = () => {
               return;
             }
 
-            chrome.storage.local.set({ availableAccounts });
             const settings = await getExtensionSettings();
-            const selectedAccounts = settings.selectedAccounts.length ? settings.selectedAccounts : Object.keys(availableAccounts);
+            const scopedAvailableAccounts = getScopedAvailableAccountsForBank(settings.availableAccounts, bankAdapter.id);
+            const scopedSelectedAccounts = getScopedSelectedAccountsForBank(settings.selectedAccounts, bankAdapter.id);
+            const allGroupKeys = Object.keys(availableAccounts);
+            const legacySelectedGroupKeys = allGroupKeys.filter((groupKey) => settings.selectedAccounts.includes(groupKey));
 
             chrome.scripting.executeScript(
               {
                 target: { tabId: currentTab.id! },
                 func: bankAdapter.extractAccounts,
-                args: [selectedAccounts],
+                args: [allGroupKeys],
               },
               (accountResults) => {
                 isScanningCurrentPage = false;
@@ -625,11 +849,95 @@ const scanCurrentPage = () => {
                   return;
                 }
 
-                const accounts = accountResults?.[0]?.result as Account[];
-                window.dispatchEvent(
-                  new CustomEvent('after-accounts-update', {
-                    detail: accounts,
-                  }),
+                const accounts = (accountResults?.[0]?.result ?? []) as Account[];
+                if (accounts.length === 0) {
+                  dispatchScanError(`Error: unable to find any ${bankAdapter.name} accounts on the current balances page.`);
+                  return;
+                }
+
+                const accountKeys = accounts.map((account) => getAccountSelectionKey(account));
+                const matchedSelectedAccountKeys = accounts
+                  .filter((account) => matchesStoredAccountSelection(account, settings.selectedAccounts, bankAdapter.id))
+                  .map((account) => getAccountSelectionKey(account));
+                const shouldDefaultToAllAccounts =
+                  scopedSelectedAccounts.length === 0 && legacySelectedGroupKeys.length === 0 && Object.keys(scopedAvailableAccounts).length === 0;
+
+                const finalizeAccountSelection = async (selectedAccountKeys: string[]) => {
+                  const normalizedSelectedAccountKeys = accountKeys.filter((accountKey) => selectedAccountKeys.includes(accountKey));
+                  const scopedAccountKeys = accountKeys.map((accountKey) => toBankScopedAccountKey(bankAdapter.id, accountKey));
+                  const mergedAvailableAccounts = Object.fromEntries(
+                    Object.entries(settings.availableAccounts).filter(
+                      ([key]) => !scopedAccountKeys.includes(key) && !accountKeys.includes(key),
+                    ),
+                  );
+                  const mergedSelectedAccounts = settings.selectedAccounts.filter(
+                    (key) =>
+                      !scopedAccountKeys.includes(key) &&
+                      !accountKeys.includes(key) &&
+                      !accounts.some((account) => account.name === key),
+                  );
+
+                  await saveExtensionSettings({
+                    availableAccounts: {
+                      ...mergedAvailableAccounts,
+                      ...buildAvailableAccountsMap(accounts, bankAdapter.id, bankAdapter.name),
+                    },
+                    selectedAccounts: [
+                      ...mergedSelectedAccounts,
+                      ...normalizedSelectedAccountKeys.map((accountKey) => toBankScopedAccountKey(bankAdapter.id, accountKey)),
+                    ],
+                  });
+
+                  window.dispatchEvent(
+                    new CustomEvent<BalanceAccountsUpdateDetail>('after-accounts-update', {
+                      detail: {
+                        bankId: bankAdapter.id,
+                        accounts,
+                        selectedAccountKeys: normalizedSelectedAccountKeys,
+                      },
+                    }),
+                  );
+                };
+
+                if (matchedSelectedAccountKeys.length > 0) {
+                  finalizeAccountSelection(matchedSelectedAccountKeys).catch((error) => {
+                    const message = error instanceof Error ? error.message : String(error);
+                    dispatchScanError(`Error: ${message}`);
+                  });
+                  return;
+                }
+
+                if (legacySelectedGroupKeys.length === 0) {
+                  const defaultSelectedAccountKeys = shouldDefaultToAllAccounts ? accountKeys : [];
+                  finalizeAccountSelection(defaultSelectedAccountKeys).catch((error) => {
+                    const message = error instanceof Error ? error.message : String(error);
+                    dispatchScanError(`Error: ${message}`);
+                  });
+                  return;
+                }
+
+                chrome.scripting.executeScript(
+                  {
+                    target: { tabId: currentTab.id! },
+                    func: bankAdapter.extractAccounts,
+                    args: [legacySelectedGroupKeys],
+                  },
+                  (legacyAccountResults) => {
+                    if (chrome.runtime.lastError) {
+                      dispatchScanError(`Error: ${chrome.runtime.lastError.message}`);
+                      return;
+                    }
+
+                    const legacyAccounts = (legacyAccountResults?.[0]?.result ?? []) as Account[];
+                    const legacySelectedAccountKeys = accountKeys.filter((accountKey) =>
+                      legacyAccounts.some((account) => getAccountSelectionKey(account) === accountKey || account.name === accountKey),
+                    );
+
+                    finalizeAccountSelection(legacySelectedAccountKeys.length > 0 ? legacySelectedAccountKeys : accountKeys).catch((error) => {
+                      const message = error instanceof Error ? error.message : String(error);
+                      dispatchScanError(`Error: ${message}`);
+                    });
+                  },
                 );
               },
             );
