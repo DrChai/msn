@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Mint Money",
+  "name": "msn",
   "version": "1.0",
   "description": "Extracts the balance amount from a page.",
   "permissions": ["activeTab", "scripting", "storage"],
@@ -9,7 +9,8 @@
   "action": {
     "default_popup": "src/popup/index.html",
     "default_icon": {
-      "16": "icon.png"
+      "16": "icon16.png",
+      "128": "icon.png"
     }
   }
 }
