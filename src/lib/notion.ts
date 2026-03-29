@@ -260,22 +260,21 @@ const findPropertyByType = (database: Database, type: string): DatabaseProperty 
 export const suggestTransactionsFieldMapping = (database: Database): TransactionsFieldMapping | null => {
   const titleProperty = database.properties.find((property) => property.type === 'title');
   const richTextProperties = database.properties.filter((property) => property.type === 'rich_text');
+  const nonSystemRichTextProperties = richTextProperties.filter(
+    (property) => property.name !== 'Account Name' && property.name !== 'Type' && property.name !== TRANSACTION_SYNC_ID_PROPERTY,
+  );
   const amountProperty = findPropertyByName(database, 'Amount') ?? findPropertyByType(database, 'number');
   const dateProperty = findPropertyByName(database, 'Date') ?? findPropertyByType(database, 'date');
   const merchantProperty =
     titleProperty ??
     findPropertyByName(database, 'Merchant') ??
+    findPropertyByName(database, 'Merchant/Description') ??
     findPropertyByName(database, 'Description') ??
-    richTextProperties[0];
+    nonSystemRichTextProperties[0];
   const accountNameProperty =
     findPropertyByName(database, 'Account Name') ??
-    richTextProperties.find((property) => property.name !== merchantProperty?.name);
-  const typeProperty =
-    findPropertyByName(database, 'Type') ??
-    findPropertyByType(database, 'select') ??
-    richTextProperties.find(
-      (property) => property.name !== merchantProperty?.name && property.name !== accountNameProperty?.name,
-    );
+    nonSystemRichTextProperties.find((property) => property.name !== merchantProperty?.name);
+  const typeProperty = findPropertyByName(database, 'Type');
 
   if (!dateProperty || !amountProperty || !merchantProperty || !accountNameProperty || !typeProperty) {
     return null;
