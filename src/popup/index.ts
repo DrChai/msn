@@ -701,11 +701,11 @@ Alpine.data('popup', () => ({
           properties[resolvedMapping!.typeProperty] =
             typeProperty.type === 'select'
               ? {
-                  type: 'select',
-                  select: {
-                    name: transaction.type,
-                  },
-                }
+                type: 'select',
+                select: {
+                  name: transaction.type,
+                },
+              }
               : toRichText(transaction.type);
 
           return notion.pages.create({

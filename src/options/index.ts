@@ -11,8 +11,8 @@ import { getExtensionSettings, saveExtensionSettings } from '../lib/storage';
 
 window.Alpine = Alpine;
 
-type AvailableAccount = { className: string; title: string };
-type SelectedAccount = AvailableAccount['className'];
+type AvailableAccount = { key: string; title: string };
+type SelectedAccount = AvailableAccount['key'];
 type MappingOption = DatabaseProperty & { selected: boolean };
 type SectionState = {
   link: string;
@@ -110,7 +110,7 @@ Alpine.data('accountOptions', () => ({
     });
   },
   applySettingsSnapshot(settings: ExtensionSettings) {
-    this.availableAccounts = Object.entries(settings.availableAccounts).map(([className, title]) => ({ className, title }));
+    this.availableAccounts = Object.entries(settings.availableAccounts).map(([key, title]) => ({ key, title }));
     this.selectedAccounts = settings.selectedAccounts;
     this.notionApiKey = settings.notionApiKey;
     this.balanceDatabase = settings.balanceDatabase;
@@ -228,6 +228,27 @@ Alpine.data('accountOptions', () => ({
         selectedAccounts,
       });
     } catch { /* empty */ }
+  },
+  async onDeleteAccount(key: string) {
+    // Filter out the deleted account from local state
+    this.availableAccounts = this.availableAccounts.filter((a) => a.key !== key);
+    
+    // Get current settings to preserve selectedAccounts for remaining accounts
+    const settings = await getExtensionSettings();
+    
+    // Update availableAccounts in storage (remove the deleted account)
+    const updatedAvailable = { ...settings.availableAccounts };
+    delete updatedAvailable[key];
+    
+    // Filter selectedAccounts: keep only those that still exist in availableAccounts
+    const remainingClassNames = new Set(this.availableAccounts.map((a) => a.key));
+    const filteredSelected = settings.selectedAccounts.filter((className) => remainingClassNames.has(className));
+    this.selectedAccounts = filteredSelected;
+    
+    await saveExtensionSettings({
+      availableAccounts: updatedAvailable,
+      selectedAccounts: filteredSelected,
+    });
   },
   onApiInput(event: Event) {
     const target = event.target as HTMLInputElement;

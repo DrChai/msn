@@ -43,11 +43,11 @@ const cibcExtractAccounts: InjectedPageFn<[selectedGroupKeys: string[]], Account
   cardContainers.forEach((container) => {
     const nameElement = container.querySelector('.account-name span');
     const balanceElement = container.querySelector('.account-balance p');
-
+    const numberElement = container.querySelector('span.account-number');
     const name = nameElement instanceof HTMLElement ? nameElement.innerText.trim() : 'No name found';
     const balance = balanceElement instanceof HTMLElement ? balanceElement.innerText.trim() : 'No balance found';
-
-    accounts.push({ name, balance });
+    const key = numberElement instanceof HTMLElement ? numberElement.innerText.trim() : '';
+    accounts.push({ name, balance, key });
   });
 
   return accounts;

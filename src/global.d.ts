@@ -1,6 +1,8 @@
+/// <reference types="chrome" />
+
 declare module '@alpinejs/csp' {
   interface AlpineInstance {
-    data(name: string, callback: (...args: any[]) => any): void;
+    data<T>(name: string, callback: () => T): AlpineInstance;
     raw<T>(value: T): T;
     start(): void;
   }

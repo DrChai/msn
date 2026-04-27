@@ -170,20 +170,29 @@
                 </div>
 
                 <ul x-show="hasAvailableAccounts" class="overflow-hidden rounded-2xl border border-stone-200 bg-white text-sm">
-                  <template x-for="(account, index) in availableAccounts" :key="account.className">
-                    <li class="flex w-full border-b border-stone-200 px-4 last:border-b-0">
+                  <template x-for="(account, index) in availableAccounts" :key="account.key">
+                    <li class="flex w-full items-center justify-between border-b border-stone-200 px-4 last:border-b-0">
                       <div class="flex items-center py-3">
                         <input
                           type="checkbox"
-                          :id="account.className"
+                          :id="account.key"
                           data-account-checkbox
                           x-model="selectedAccounts"
-                          :value="account.className"
+                          :value="account.key"
                           @change="onCheckBoxChange"
                           class="h-4 w-4 rounded-sm border border-stone-300 accent-lime-700 focus:ring-2 focus:ring-lime-600"
                         />
-                        <label :for="account.className" class="ml-3 text-sm font-medium text-stone-800" x-text="account.title"></label>
+                        <label :for="account.key" class="ml-3 text-sm font-medium text-stone-800" x-text="account.title"></label>
                       </div>
+                      <button
+                        @click="onDeleteAccount(account.key)"
+                        class="mr-2 rounded-full p-1.5 text-stone-400 transition hover:bg-red-50 hover:text-red-600"
+                        title="Remove account"
+                      >
+                        <svg class="h-4 w-4" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18 18 6M6 6l12 12" />
+                        </svg>
+                      </button>
                     </li>
                   </template>
                 </ul>

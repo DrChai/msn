@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Mint Money",
-  "version": "1.0",
+  "name": "MSN - Money Sync to Notion",
+  "version": "1.1",
   "description": "Extracts the balance amount from a page.",
   "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": ["https://api.notion.com/*"],
@@ -9,7 +9,10 @@
   "action": {
     "default_popup": "src/popup/index.html",
     "default_icon": {
-      "16": "icon.png"
+      "16": "icons/attempt-3-minimal-arrow-grid-16.png",
+      "32": "icons/attempt-3-minimal-arrow-grid-32.png",
+      "48": "icons/attempt-3-minimal-arrow-grid-48.png",
+      "128": "icons/attempt-3-minimal-arrow-grid-128.png"
     }
   }
 }
